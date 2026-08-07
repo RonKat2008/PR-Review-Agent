@@ -1,0 +1,54 @@
+# PRIME PR Review Agent — configuration
+#
+# Secrets NEVER go in this file. They are read from environment variables:
+#   GITHUB_TOKEN               - repo access for gh CLI
+#   PRIME_REVIEW_WEBHOOK_URL   - Slack/Discord/generic webhook
+# See .env.example.
+
+[repo]
+# TODO: fill in when you provide the target repo.
+owner = ""      # e.g. "PrimeIntellect-ai"
+name = ""       # e.g. "prime-agent"
+
+[schedule]
+# Cron expressions handed to `prime-agent schedule add`.
+open_prs = "0 */4 * * *"      # every 4 hours
+merged_prs = "0 9 * * 1-5"    # weekday mornings at 09:00
+
+[review]
+# SAFETY: while true, reviews are written locally and pushed to the webhook,
+# but NOT posted as PR comments. Flip to false when you trust the output.
+dry_run = true
+
+# Findings below this confidence are recorded locally but never posted.
+min_confidence = 0.7
+
+# Hard cap on comments per sweep, so a bad prompt cannot spray the repo.
+max_comments_per_sweep = 5
+
+# How far back the merged-PR lane looks on a cold start.
+merged_lookback_days = 7
+
+# PRs authored by this login are skipped (prevents self-review loops).
+# TODO: set to the bot/account the agent posts as.
+bot_login = ""
+
+# Files matching these globs are stripped from diffs before review.
+ignore_paths = [
+    "**/*.lock",
+    "**/package-lock.json",
+    "**/uv.lock",
+    "**/*.snap",
+    "**/dist/**",
+    "**/build/**",
+    "**/*.min.js",
+]
+
+# Diffs larger than this are truncated with a marker (token guard).
+max_diff_bytes = 200000
+
+[sinks]
+pr_comment = true       # gated by review.dry_run
+webhook = true
+local_file = true       # always on; the audit trail
+webhook_kind = "slack"  # slack | discord | generic

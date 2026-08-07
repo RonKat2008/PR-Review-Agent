@@ -1,0 +1,31 @@
+# Secrets — never commit
+.env
+*.pem
+*.key
+
+# Runtime state (per-machine watermarks, not shared)
+state/*.json
+
+# Generated reviews
+reviews/*.md
+reviews/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# prime-agent session artifacts
+.prime/sessions/
+.prime/logs/
+
+# OS
+Thumbs.db
+.DS_Store
