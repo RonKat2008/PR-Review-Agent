@@ -10,11 +10,18 @@ Two lanes:
 
 ## Status
 
-Built and tested. **Not yet connected** — needs a repo, a token, and a webhook URL.
+**Working.** First live sweep scored 4/4 against a controlled repo with planted
+defects — including correctly staying silent on a behavior-preserving change.
+
+See **[RESULTS.md](RESULTS.md)** for the full reviews and caveats.
 
 ```
 131 tests passing, 97% coverage
+4 considered | 4 reviewed | 0 posted (dry-run) | 0 errors
 ```
+
+Currently pointed at a throwaway demo repo. Not yet aimed at a real project, and
+nothing has posted to GitHub — `dry_run = true`.
 
 ## Setup
 

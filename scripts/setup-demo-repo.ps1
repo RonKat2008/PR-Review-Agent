@@ -14,6 +14,8 @@
   PR 4 is the important one. A demo where everything gets flagged proves nothing
   about precision; the agent must stay quiet on a behavior-preserving change.
 
+  Safe to re-run: an existing empty repo is reused rather than recreated.
+
 .EXAMPLE
   .\scripts\setup-demo-repo.ps1 -RepoName prime-review-demo
 #>
@@ -25,7 +27,22 @@ param(
     [string]$Visibility = "private"
 )
 
-$ErrorActionPreference = "Stop"
+# Native commands write warnings to stderr (git's CRLF notice, for one). Under
+# ErrorActionPreference=Stop those become terminating errors and abort the script,
+# so exit codes are checked explicitly instead.
+$ErrorActionPreference = "Continue"
+
+function Invoke-Checked {
+    param(
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][scriptblock]$Command
+    )
+    $output = & $Command 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "$What failed (exit $LASTEXITCODE):`n$($output -join "`n")"
+    }
+    return $output
+}
 
 function Assert-Prereqs {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
@@ -35,32 +52,53 @@ function Assert-Prereqs {
     if ($LASTEXITCODE -ne 0) { throw "gh is not authenticated. Run: gh auth login" }
 }
 
-function New-Branch {
-    param([string]$Name, [scriptblock]$Change, [string]$Title, [string]$Body)
-
-    git checkout -q main
-    git checkout -q -b $Name
+function New-DemoBranch {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Change,
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][string]$Body
+    )
+    Invoke-Checked "git checkout main" { git checkout -q main }
+    Invoke-Checked "git checkout -b $Name" { git checkout -q -b $Name }
     & $Change
-    git add -A
-    git commit -q -m $Title
-    git push -q -u origin $Name
-    gh pr create --title $Title --body $Body --base main --head $Name | Out-Null
+    Invoke-Checked "git add" { git add -A }
+    Invoke-Checked "git commit" { git commit -q -m $Title }
+    Invoke-Checked "git push $Name" { git push -q -u --force origin $Name }
+    $existing = gh pr list --head $Name --json number --jq '.[0].number' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $existing) {
+        Write-Host "  PR already open for $Name (#$existing)" -ForegroundColor Yellow
+        return
+    }
+    Invoke-Checked "gh pr create" { gh pr create --title $Title --body $Body --base main --head $Name }
     Write-Host "  opened PR: $Title" -ForegroundColor Green
 }
 
 Assert-Prereqs
 
-$owner = (gh api user --jq .login).Trim()
+$owner = (Invoke-Checked "gh api user" { gh api user --jq .login }).Trim()
+$slug = "$owner/$RepoName"
 $workdir = Join-Path $env:TEMP "prime-demo-$(Get-Random)"
 New-Item -ItemType Directory -Force -Path $workdir | Out-Null
 Push-Location $workdir
 
 try {
-    Write-Host "Creating $owner/$RepoName ..." -ForegroundColor Cyan
-    gh repo create $RepoName --$Visibility --description "Throwaway repo for evaluating the Prime PR review agent" | Out-Null
+    gh repo view $slug *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Reusing existing repo $slug" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "Creating $slug ..." -ForegroundColor Cyan
+        Invoke-Checked "gh repo create" {
+            gh repo create $RepoName --$Visibility --description "Throwaway repo for evaluating the Prime PR review agent"
+        }
+    }
 
-    git init -q -b main
-    git remote add origin "https://github.com/$owner/$RepoName.git"
+    Invoke-Checked "git init" { git init -q -b main }
+    # Suppress the CRLF conversion notice; it is noise here and it writes to stderr.
+    Invoke-Checked "git config autocrlf" { git config core.autocrlf false }
+    Invoke-Checked "git config safecrlf" { git config core.safecrlf false }
+    Invoke-Checked "git remote add" { git remote add origin "https://github.com/$slug.git" }
 
     # ---------- baseline ----------
     New-Item -ItemType Directory -Force -Path "shop" | Out-Null
@@ -112,13 +150,16 @@ def get_customer(conn, customer_id):
 Deliberately small demo service. Used to evaluate an automated PR reviewer.
 '@ | Set-Content "README.md" -Encoding utf8
 
-    git add -A
-    git commit -q -m "Initial commit: order and customer modules"
-    git push -q -u origin main
+    Invoke-Checked "git add baseline" { git add -A }
+    Invoke-Checked "git commit baseline" { git commit -q -m "Initial commit: order and customer modules" }
+    # Force-push: this repo is throwaway scaffolding, and a partially-completed
+    # earlier run may have left commits on the remote.
+    Invoke-Checked "git push main" { git push -q -u --force origin main }
     Write-Host "  baseline pushed" -ForegroundColor Green
 
     # ---------- PR 1: introduces bugs ----------
-    New-Branch -Name "perf/skip-last-item" -Title "Speed up total_price" -Body "Avoids iterating the whole list." -Change {
+    New-DemoBranch -Name "perf/skip-last-item" -Title "Speed up total_price" `
+        -Body "Avoids iterating the whole list." -Change {
         @'
 """Order processing."""
 
@@ -152,7 +193,8 @@ def order_summary(orders, order_id):
     }
 
     # ---------- PR 2: fixes a real bug ----------
-    New-Branch -Name "fix/missing-order-guard" -Title "Guard against a missing order" -Body "order_summary crashed when find_order returned None." -Change {
+    New-DemoBranch -Name "fix/missing-order-guard" -Title "Guard against a missing order" `
+        -Body "order_summary crashed when find_order returned None." -Change {
         $text = Get-Content "shop/orders.py" -Raw
         $text = $text.Replace(
 @'
@@ -169,7 +211,8 @@ def order_summary(orders, order_id):
     }
 
     # ---------- PR 3: security ----------
-    New-Branch -Name "feat/customer-search" -Title "Add customer search by name" -Body "Supports partial name matching." -Change {
+    New-DemoBranch -Name "feat/customer-search" -Title "Add customer search by name" `
+        -Body "Supports partial name matching." -Change {
         @'
 """Customer lookups."""
 import sqlite3
@@ -191,7 +234,8 @@ def search_customers(conn, name):
     }
 
     # ---------- PR 4: clean, must stay silent ----------
-    New-Branch -Name "chore/clarify-naming" -Title "Clarify parameter naming in apply_discount" -Body "Renames a parameter and expands a docstring. No behavior change." -Change {
+    New-DemoBranch -Name "chore/clarify-naming" -Title "Clarify parameter naming in apply_discount" `
+        -Body "Renames a parameter and expands a docstring. No behavior change." -Change {
         $text = Get-Content "shop/orders.py" -Raw
         $text = $text.Replace(
 @'
@@ -212,19 +256,19 @@ def apply_discount(total, discount_percent):
         $text | Set-Content "shop/orders.py" -Encoding utf8
     }
 
-    git checkout -q main
+    Invoke-Checked "git checkout main" { git checkout -q main }
 
     Write-Host ""
-    Write-Host "Done. Repo: https://github.com/$owner/$RepoName" -ForegroundColor Cyan
+    Write-Host "Done. Repo: https://github.com/$slug" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Answer key:" -ForegroundColor Yellow
-    Write-Host "  PR 1 'Speed up total_price'      -> HIGH: off-by-one; swallowed exception returning None"
-    Write-Host "  PR 2 'Guard against missing order' -> fixes[]: null dereference. No new bugs."
-    Write-Host "  PR 3 'Add customer search'       -> CRITICAL: SQL injection"
-    Write-Host "  PR 4 'Clarify parameter naming'  -> SILENT. Must not post."
+    Write-Host "  PR 'Speed up total_price'          -> HIGH: off-by-one; swallowed exception returns None"
+    Write-Host "  PR 'Guard against a missing order' -> fixes[]: null dereference. No new bugs."
+    Write-Host "  PR 'Add customer search by name'   -> CRITICAL: SQL injection"
+    Write-Host "  PR 'Clarify parameter naming'      -> SILENT. Must not post."
     Write-Host ""
     Write-Host "Now set in config.toml:" -ForegroundColor Yellow
-    Write-Host "  [repo] owner = `"$owner`"   name = `"$RepoName`""
+    Write-Host "  [repo]   owner = `"$owner`"   name = `"$RepoName`""
     Write-Host "  [review] bot_login = `"`"   (empty, so your own PRs are still reviewed)"
 }
 finally {
