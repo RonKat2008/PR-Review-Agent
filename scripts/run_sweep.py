@@ -28,6 +28,15 @@ from prime_pr_review.sweep import Enrichment, sweep_lane  # noqa: E402
 
 AUTH_FILE = Path.home() / ".prime" / "agent" / "auth.json"
 
+# Every agent-owned path is resolved against the agent's own directory, never the
+# process working directory. Call-site discovery requires running from inside the
+# reviewed repo's checkout, so cwd belongs to the repo under review — prompts,
+# state, and reviews must not follow it there.
+AGENT_ROOT = Path(__file__).resolve().parent.parent
+PROMPTS_DIR = AGENT_ROOT / "skills" / "pr-review" / "prompts"
+STATE_FILE = AGENT_ROOT / "state" / "watermark.json"
+REVIEWS_DIR = AGENT_ROOT / "reviews"
+
 
 def resolve_api_key() -> str:
     """Prefer the environment; fall back to the prime-agent auth file."""
@@ -72,7 +81,7 @@ def main() -> int:
         print(f"Config error: {exc}", file=sys.stderr)
         return 1
 
-    state = load_state()
+    state = load_state(STATE_FILE)
     if args.fresh:
         from prime_pr_review.state import State
 
@@ -82,14 +91,17 @@ def main() -> int:
     print(f"Sweeping {repo.slug} | lane={args.lane} | model={args.model} | {mode}\n")
 
     api_key = resolve_api_key()
-    reviewer = gemini_reviewer(api_key, model=args.model)
+    reviewer = gemini_reviewer(api_key, model=args.model, prompts_dir=PROMPTS_DIR)
     enrichment = Enrichment(
         model_fn=gemini_model_fn(api_key, model=args.model),
         repo_root=Path(config.review.repo_root or "."),
+        prompts_dir=PROMPTS_DIR,
     )
 
-    report, state = sweep_lane(config, args.lane, reviewer, state, enrichment=enrichment)
-    save_state(state)
+    report, state = sweep_lane(
+        config, args.lane, reviewer, state, enrichment=enrichment, reviews_dir=REVIEWS_DIR
+    )
+    save_state(state, STATE_FILE)
 
     for line in report.summaries():
         print(f"  {line}")

@@ -60,6 +60,8 @@ max_diff_bytes = 200000
 #
 # Under GitHub Actions this is simply the workspace, so it becomes automatic.
 # TODO: set when you have the target repo cloned locally.
+# Verified working by cloning the target repo and running the sweep from inside it:
+#   cd <checkout> && python <agent>/scripts/run_sweep.py --config <agent>/config.toml
 repo_root = ""
 gather_context = true
 max_context_bytes = 400000

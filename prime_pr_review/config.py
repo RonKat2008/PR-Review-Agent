@@ -69,6 +69,9 @@ class ReviewConfig:
     max_context_bytes: int = 400_000
     # Run the two-pass intent check: does the diff do what the PR claims?
     check_intent: bool = True
+    # Run blast-radius analysis: what else does this change break? Needs repo_root,
+    # since call-site discovery shells out to `git grep`.
+    check_blast: bool = True
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,7 @@ def _build_config(raw: dict) -> Config:
             gather_context=bool(review.get("gather_context", True)),
             max_context_bytes=int(review.get("max_context_bytes", 400_000)),
             check_intent=bool(review.get("check_intent", True)),
+            check_blast=bool(review.get("check_blast", True)),
         ),
         sinks=SinkConfig(
             pr_comment=bool(sinks.get("pr_comment", True)),

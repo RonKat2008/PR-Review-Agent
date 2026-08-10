@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import context as context_mod
 from . import github
+from .blast import analyze_blast_radius
 from .config import Config, Secrets
 from .diffs import filter_diff
 from .github import PullRequest
@@ -184,6 +185,9 @@ def _review_one(
     verdict, scope_notes = _attach_scope(config, pr, filtered.text, verdict, enrichment)
     notes += scope_notes
 
+    verdict, blast_notes = _attach_blast(config, pr, filtered.text, verdict, enrichment)
+    notes += blast_notes
+
     body = render_markdown(pr, verdict, lane)
     local_path = write_local(pr, verdict, body, lane, reviews_dir) if config.sinks.local_file else None
     outcome = post_pr_comment(config, pr, verdict, body, budget, runner)
@@ -261,6 +265,38 @@ def _attach_scope(
         return verdict, (f"intent check failed: {exc}",)
 
     return replace(verdict, scope=scope), ()
+
+
+def _attach_blast(
+    config: Config,
+    pr: PullRequest,
+    diff: str,
+    verdict: Verdict,
+    enrichment: Enrichment | None,
+) -> tuple[Verdict, tuple[str, ...]]:
+    """Run blast-radius analysis and attach its entries to the verdict."""
+    if enrichment is None or enrichment.model_fn is None or not config.review.check_blast:
+        return verdict, ()
+
+    # Same constraint as context gathering: call-site discovery runs `git grep` in
+    # the process working directory. Without the reviewed repo checked out we would
+    # report matches from an unrelated codebase as callers of this PR's symbols.
+    if not config.review.repo_root:
+        return verdict, ("blast radius skipped: review.repo_root is not set",)
+
+    try:
+        entries = analyze_blast_radius(
+            pr,
+            diff,
+            enrichment.model_fn,
+            context_mod.default_git_runner,
+            enrichment.repo_root,
+            enrichment.prompts_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 - degrade, never fail the review
+        return verdict, (f"blast radius failed: {exc}",)
+
+    return replace(verdict, blast_radius=entries), ()
 
 
 def _select_candidates(
