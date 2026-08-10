@@ -38,15 +38,43 @@ require_repo(config)
 secrets = require_secrets(config)
 
 PROMPTS = Path("skills/pr-review/prompts")
+VERDICTS = Path("state/verdicts")
 
 async def reviewer(pr, diff, lane):
+    """Spawn a child agent and wait for the verdict file it writes.
+
+    IMPORTANT: `rlm(...)` returns an admission handle immediately. It does NOT
+    return the child's answer. Results come back only through `agent_message`
+    replies or files — here, a file, because the payload is structured JSON.
+    """
+    VERDICTS.mkdir(parents=True, exist_ok=True)
+    out_path = (VERDICTS / f"{lane}-{pr.number}-{pr.head_sha[:8]}.json").resolve()
+    out_path.unlink(missing_ok=True)
+
     template = (PROMPTS / f"{lane}_pr.md").read_text(encoding="utf-8")
-    return await rlm(
+    await rlm(
         f"{template}\n\n"
         f"## PR #{pr.number}: {pr.title}\n"
         f"author: {pr.author} | base: {pr.base_ref} | {pr.changed_files} files\n\n"
-        f"## Diff\n\n```diff\n{diff}\n```"
+        f"## Diff\n\n```diff\n{diff}\n```\n\n"
+        f"## Output\n\n"
+        f"Write ONLY the JSON verdict to `{out_path}`. Reply with no prose.",
+        name=f"review-{lane}-{pr.number}",
     )
+
+    return await _await_verdict(out_path)
+
+
+async def _await_verdict(path, timeout=300, interval=2):
+    """Poll for the child's verdict file. Raises on timeout so the sweep records
+    an error for this PR and moves on rather than hanging the whole run."""
+    waited = 0
+    while waited < timeout:
+        if path.is_file() and path.stat().st_size > 0:
+            return path.read_text(encoding="utf-8")
+        await asyncio.sleep(interval)
+        waited += interval
+    raise TimeoutError(f"No verdict written to {path} within {timeout}s")
 
 state = load_state()
 report, state = sweep_lane(config, LANE_OPEN, reviewer, state)
@@ -57,8 +85,21 @@ print(f"{report.considered} considered, {report.reviewed} reviewed, "
       f"{report.posted} posted, {report.errors} errors")
 ```
 
-Fan the PRs out concurrently rather than serially when the lane returns more than a
-few — each subagent is independent.
+### Why the file handoff
+
+`rlm(...)` admits the child and returns a handle carrying `rlm_child_id`, `name`,
+`session_dir`, and `model` — **never the child's answer**. Awaiting the call gives you
+the handle, not a review. Children report back explicitly:
+
+```python
+await agent_message.send(text, receiver_role="parent")   # prose
+```
+
+For a structured verdict a file is the better channel: it survives compaction, it is
+inspectable after the fact, and it does not need parsing out of a message stream.
+
+Spawning is non-blocking, so for a lane returning many PRs, spawn every child first and
+only then wait on the files — that is where the per-PR context isolation pays off.
 
 ## Scheduling
 

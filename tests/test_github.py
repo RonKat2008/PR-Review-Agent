@@ -86,7 +86,8 @@ def test_open_pr_query_targets_the_right_repo_and_state():
     assert "--state open" in args
 
 
-def test_merged_pr_query_includes_a_date_bounded_search():
+def test_merged_pr_query_avoids_the_eventually_consistent_search_index():
+    """`--search` lags merges by up to a minute; a just-merged PR must not be missed."""
     gh = FakeGh().on(is_pr_list, "[]")
     since = datetime(2026, 8, 1, tzinfo=timezone.utc)
 
@@ -94,7 +95,44 @@ def test_merged_pr_query_includes_a_date_bounded_search():
 
     args = " ".join(gh.calls[0][0])
     assert "--state merged" in args
-    assert "merged:>=2026-08-01" in args
+    assert "--search" not in args
+
+
+def test_merged_prs_are_filtered_by_merge_timestamp():
+    recent = make_pr(number=1, merged_at="2026-08-09T12:00:00Z")
+    stale = make_pr(number=2, merged_at="2026-07-01T12:00:00Z")
+    gh = FakeGh().on(is_pr_list, pr_list_json(recent, stale))
+    since = datetime(2026, 8, 1, tzinfo=timezone.utc)
+
+    result = list_merged_prs("acme/widget", since, gh)
+
+    assert [p.number for p in result] == [1]
+
+
+def test_merged_pr_exactly_at_the_cutoff_is_included():
+    pr = make_pr(number=1, merged_at="2026-08-01T00:00:00Z")
+    gh = FakeGh().on(is_pr_list, pr_list_json(pr))
+
+    result = list_merged_prs("acme/widget", datetime(2026, 8, 1, tzinfo=timezone.utc), gh)
+
+    assert len(result) == 1
+
+
+def test_pr_without_a_merge_timestamp_is_excluded():
+    gh = FakeGh().on(is_pr_list, pr_list_json(make_pr(number=1, merged_at=None)))
+
+    result = list_merged_prs("acme/widget", datetime(2026, 8, 1, tzinfo=timezone.utc), gh)
+
+    assert result == ()
+
+
+def test_unparseable_merge_timestamp_is_kept_rather_than_dropped():
+    """Reviewing a PR twice is cheap. Silently dropping one is not."""
+    gh = FakeGh().on(is_pr_list, pr_list_json(make_pr(number=1, merged_at="not-a-date")))
+
+    result = list_merged_prs("acme/widget", datetime(2026, 8, 1, tzinfo=timezone.utc), gh)
+
+    assert len(result) == 1
 
 
 def test_fetches_a_raw_diff():

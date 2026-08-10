@@ -96,19 +96,40 @@ def list_merged_prs(
     runner: GhRunner = default_runner,
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> tuple[PullRequest, ...]:
-    """PRs merged on or after `since`, newest first."""
+    """PRs merged on or after `since`, newest first.
+
+    Deliberately uses `--state merged` and filters client-side rather than passing
+    `--search merged:>=...`. The search flag hits GitHub's search index, which is
+    eventually consistent and lags merges by up to a minute — a PR merged moments
+    before a sweep would be invisible to it and, because the next sweep advances the
+    watermark past it, could be missed permanently. The list API is immediately
+    consistent.
+    """
     raw = runner(
         [
             "pr", "list",
             "--repo", repo_slug,
             "--state", "merged",
-            "--search", f"merged:>={since.date().isoformat()}",
             "--json", PR_FIELDS,
             "--limit", str(limit),
         ],
         None,
     )
-    return _parse_pr_list(raw)
+    return tuple(pr for pr in _parse_pr_list(raw) if _merged_since(pr, since))
+
+
+def _merged_since(pr: PullRequest, since: datetime) -> bool:
+    """Whether a PR merged at or after `since`. Unparseable timestamps are kept —
+    reviewing one PR twice is cheap; dropping one silently is not."""
+    if not pr.merged_at:
+        return False
+    try:
+        merged = datetime.fromisoformat(pr.merged_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if merged.tzinfo is None:
+        merged = merged.replace(tzinfo=timezone.utc)
+    return merged >= since
 
 
 def fetch_diff(repo_slug: str, number: int, runner: GhRunner = default_runner) -> str:

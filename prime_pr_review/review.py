@@ -44,6 +44,18 @@ class Finding:
     severity: Severity
     claim: str
     evidence: str
+    # Replacement code rendered as a GitHub ```suggestion block. Empty when the
+    # fix is not a clean drop-in for the flagged lines.
+    suggestion: str = ""
+    # End of the replaced range for multi-line suggestions; None means one line.
+    line_end: int | None = None
+    # Corroborating static-analysis rule, e.g. "bandit:B608". Raises trust and
+    # lets the reader verify without taking the model's word for it.
+    corroboration: str = ""
+
+    @property
+    def has_suggestion(self) -> bool:
+        return bool(self.suggestion.strip())
 
 
 @dataclass(frozen=True)
@@ -55,19 +67,97 @@ class FixClaim:
 
 
 @dataclass(frozen=True)
+class ScopeIssue:
+    """A change that does not serve the PR's stated intent."""
+
+    file: str
+    lines: str
+    severity: Severity
+    claim: str
+    evidence: str
+
+
+@dataclass(frozen=True)
+class Scope:
+    """Whether the diff matches what the PR says it does (P8)."""
+
+    intent: str
+    aligned: bool
+    unrelated: tuple[ScopeIssue, ...] = ()
+
+    @property
+    def worst_severity(self) -> Severity | None:
+        if not self.unrelated:
+            return None
+        return min((i.severity for i in self.unrelated), key=lambda s: s.rank)
+
+
+@dataclass(frozen=True)
+class BrokenCaller:
+    """A call site the change breaks."""
+
+    file: str
+    line: int | None
+    severity: Severity
+    claim: str
+
+
+@dataclass(frozen=True)
+class BlastRadius:
+    """Impact of one changed symbol on the rest of the codebase (P9)."""
+
+    symbol: str
+    kind: str
+    change: str
+    breaks: tuple[BrokenCaller, ...] = ()
+    unbroken_callers: int = 0
+
+    @property
+    def checked(self) -> int:
+        """Total call sites examined. Reporting this proves the check ran."""
+        return len(self.breaks) + self.unbroken_callers
+
+
+@dataclass(frozen=True)
 class Verdict:
     introduces: tuple[Finding, ...]
     fixes: tuple[FixClaim, ...]
     confidence: float
+    scope: Scope | None = None
+    blast_radius: tuple[BlastRadius, ...] = ()
+
+    @property
+    def broken_callers(self) -> tuple[BrokenCaller, ...]:
+        return tuple(caller for entry in self.blast_radius for caller in entry.breaks)
+
+    @property
+    def callers_checked(self) -> int:
+        return sum(entry.checked for entry in self.blast_radius)
 
     @property
     def has_blocking(self) -> bool:
-        return any(f.severity.value in BLOCKING_SEVERITIES for f in self.introduces)
+        """Anything severe enough to justify blocking a merge.
+
+        A broken caller is always blocking: the PR demonstrably breaks working code.
+        """
+        if any(f.severity.value in BLOCKING_SEVERITIES for f in self.introduces):
+            return True
+        if any(c.severity.value in BLOCKING_SEVERITIES for c in self.broken_callers):
+            return True
+        scope = self.scope
+        return bool(
+            scope and any(i.severity is Severity.CRITICAL for i in scope.unrelated)
+        )
 
     @property
     def is_silent(self) -> bool:
-        """Nothing found either way — not worth posting."""
-        return not self.introduces and not self.fixes
+        """Nothing found on any axis — not worth posting."""
+        return not (
+            self.introduces
+            or self.fixes
+            or self.broken_callers
+            or (self.scope and self.scope.unrelated)
+        )
 
     @property
     def worst_severity(self) -> Severity | None:
@@ -84,13 +174,94 @@ def parse_verdict(raw: str) -> Verdict:
         introduces = tuple(_parse_finding(item) for item in payload.get("introduces", []))
         fixes = tuple(_parse_fix(item) for item in payload.get("fixes", []))
         confidence = float(payload.get("confidence", 0.0))
+        scope = _parse_scope(payload.get("scope"))
+        blast = tuple(_parse_blast(item) for item in payload.get("blast_radius", []))
     except (TypeError, ValueError, AttributeError) as exc:
         raise VerdictError(f"Verdict fields are malformed: {exc}") from exc
 
     if not 0.0 <= confidence <= 1.0:
         raise VerdictError(f"confidence must be between 0.0 and 1.0, got {confidence}")
 
-    return Verdict(introduces=introduces, fixes=fixes, confidence=confidence)
+    return Verdict(
+        introduces=introduces,
+        fixes=fixes,
+        confidence=confidence,
+        scope=scope,
+        blast_radius=blast,
+    )
+
+
+def _parse_scope(raw: object) -> Scope | None:
+    """Parse the P8 intent-alignment block. Absent is valid — older prompts omit it."""
+    if not isinstance(raw, dict):
+        return None
+
+    intent = str(raw.get("intent", "")).strip()
+    if not intent:
+        raise VerdictError("scope.intent must be a non-empty string when scope is present")
+
+    issues = tuple(_parse_scope_issue(item) for item in raw.get("unrelated", []))
+    # Trust the findings over the flag: a model that lists problems then claims
+    # alignment is contradicting itself, and the list is the harder evidence.
+    aligned = bool(raw.get("aligned", True)) and not issues
+
+    return Scope(intent=intent, aligned=aligned, unrelated=issues)
+
+
+def _parse_scope_issue(item: dict) -> ScopeIssue:
+    claim = str(item.get("claim", "")).strip()
+    if not claim:
+        raise VerdictError("Every scope issue must carry a non-empty 'claim'")
+    return ScopeIssue(
+        file=str(item.get("file", "")).strip(),
+        lines=str(item.get("lines", "")).strip(),
+        severity=_parse_severity(item.get("severity")),
+        claim=claim,
+        evidence=str(item.get("evidence", "")).strip(),
+    )
+
+
+def _parse_blast(item: dict) -> BlastRadius:
+    """Parse one P9 blast-radius entry."""
+    symbol = str(item.get("symbol", "")).strip()
+    if not symbol:
+        raise VerdictError("Every blast_radius entry must name a 'symbol'")
+
+    unbroken = item.get("unbroken_callers", 0)
+    return BlastRadius(
+        symbol=symbol,
+        kind=str(item.get("kind", "")).strip(),
+        change=str(item.get("change", "")).strip(),
+        breaks=tuple(_parse_broken_caller(b) for b in item.get("breaks", [])),
+        unbroken_callers=int(unbroken) if str(unbroken).isdigit() else 0,
+    )
+
+
+def _parse_broken_caller(item: dict) -> BrokenCaller:
+    claim = str(item.get("claim", "")).strip()
+    if not claim:
+        raise VerdictError("Every broken caller must carry a non-empty 'claim'")
+    line_raw = item.get("line")
+    return BrokenCaller(
+        file=str(item.get("file", "")).strip(),
+        line=int(line_raw) if _is_int_like(line_raw) else None,
+        severity=_parse_severity(item.get("severity")),
+        claim=claim,
+    )
+
+
+def _parse_severity(raw: object) -> Severity:
+    value = str(raw or "").upper()
+    try:
+        return Severity(value)
+    except ValueError as exc:
+        raise VerdictError(
+            f"Unknown severity {value!r}; expected one of {SEVERITY_ORDER}"
+        ) from exc
+
+
+def _is_int_like(value: object) -> bool:
+    return isinstance(value, int) or (isinstance(value, str) and value.isdigit())
 
 
 def passes_gate(verdict: Verdict, min_confidence: float) -> bool:
@@ -164,25 +335,21 @@ def _extract_json(raw: str) -> dict:
 
 
 def _parse_finding(item: dict) -> Finding:
-    severity_raw = str(item.get("severity", "")).upper()
-    try:
-        severity = Severity(severity_raw)
-    except ValueError as exc:
-        raise VerdictError(
-            f"Unknown severity {severity_raw!r}; expected one of {SEVERITY_ORDER}"
-        ) from exc
-
     claim = str(item.get("claim", "")).strip()
     if not claim:
         raise VerdictError("Every finding must carry a non-empty 'claim'")
 
     line_raw = item.get("line")
+    end_raw = item.get("line_end")
     return Finding(
         file=str(item.get("file", "")).strip(),
-        line=int(line_raw) if isinstance(line_raw, (int, str)) and str(line_raw).isdigit() else None,
-        severity=severity,
+        line=int(line_raw) if _is_int_like(line_raw) else None,
+        severity=_parse_severity(item.get("severity")),
         claim=claim,
         evidence=str(item.get("evidence", "")).strip(),
+        suggestion=str(item.get("suggestion", "")).rstrip(),
+        line_end=int(end_raw) if _is_int_like(end_raw) else None,
+        corroboration=str(item.get("corroboration", "")).strip(),
     )
 
 
