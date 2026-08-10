@@ -235,8 +235,8 @@ def _read_prompt(directory: Path) -> str:
 
 
 def _extract_python_symbols(file_diff: FileDiff) -> list[ChangedSymbol]:
-    old_lines = _side_lines(file_diff.body, "-")
-    new_lines = _side_lines(file_diff.body, "+")
+    old_lines = _reconstructed_lines(file_diff.body, keep="-", header="---")
+    new_lines = _reconstructed_lines(file_diff.body, keep="+", header="+++")
 
     old_sigs = _collect_signatures(old_lines)
     new_sigs = _collect_signatures(new_lines)
@@ -250,15 +250,18 @@ def _extract_python_symbols(file_diff: FileDiff) -> list[ChangedSymbol]:
     return changed
 
 
-def _side_lines(body: str, prefix: str) -> list[str]:
-    """Content of every added (`+`) or removed (`-`) line, in file order.
+def _reconstructed_lines(body: str, keep: str, header: str) -> list[str]:
+    """Reconstruct one side (old or new) of a hunk: context lines plus that side's changes.
 
-    File header lines (`+++`/`---`) share the same first character as the
-    lines we want, so they are excluded explicitly.
+    A multi-line `def foo(\\n    a,\\n):` where only one parameter line actually
+    changed shows the rest as unchanged context (` `), not as `+`/`-` — using
+    only `+`/`-` lines would silently lose the def line and the closing paren.
+    Keeping context (` `) on both sides, plus `keep` (`+` or `-`) on its own
+    side, reconstructs each hunk's true before/after text.
     """
     lines: list[str] = []
     for line in body.splitlines():
-        if not line or line[0] != prefix or line.startswith(("+++", "---")):
+        if not line or line[0] not in (" ", keep) or line.startswith(header):
             continue
         lines.append(line[1:])
     return lines

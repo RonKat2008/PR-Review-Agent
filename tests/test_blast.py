@@ -212,6 +212,22 @@ def test_constant_value_change_is_detected():
     assert "changed from '3' to '5'" in symbol.change
 
 
+def test_constant_reassigned_to_the_same_value_is_not_reported():
+    diff = """diff --git a/src/config.py b/src/config.py
+--- a/src/config.py
++++ b/src/config.py
+@@ -1,2 +1,2 @@
+-MAX_RETRIES = 3
+-MIN_RETRIES = 1
++MAX_RETRIES = 3
++MIN_RETRIES = 2
+"""
+    symbols = extract_changed_symbols(diff)
+
+    names = {s.name for s in symbols}
+    assert names == {"MIN_RETRIES"}
+
+
 def test_a_newly_added_function_with_no_prior_existence_is_not_reported():
     diff = """diff --git a/src/pricing.py b/src/pricing.py
 --- a/src/pricing.py
@@ -225,6 +241,70 @@ def test_a_newly_added_function_with_no_prior_existence_is_not_reported():
     symbols = extract_changed_symbols(diff)
 
     assert symbols == ()
+
+
+def test_added_required_keyword_only_parameter_is_detected():
+    diff = """diff --git a/src/pricing.py b/src/pricing.py
+--- a/src/pricing.py
++++ b/src/pricing.py
+@@ -1,2 +1,2 @@
+-def total_price(items, *, currency="usd"):
++def total_price(items, *, currency="usd", tax_rate):
+     return sum(items)
+"""
+    symbols = extract_changed_symbols(diff)
+
+    assert len(symbols) == 1
+    assert "added required parameter(s) tax_rate" in symbols[0].change
+
+
+def test_adding_varargs_and_kwargs_alone_is_not_reported_as_a_breaking_change():
+    """*args/**kwargs are purely additive — every existing call still works, so
+    this must not be flagged (unlike an added required parameter)."""
+    diff = """diff --git a/src/pricing.py b/src/pricing.py
+--- a/src/pricing.py
++++ b/src/pricing.py
+@@ -1,2 +1,2 @@
+-def total_price(items):
++def total_price(items, *args, **kwargs):
+     return sum(items)
+"""
+    symbols = extract_changed_symbols(diff)
+
+    assert symbols == ()
+
+
+def test_removing_an_existing_kwargs_catch_all_is_reported():
+    diff = """diff --git a/src/pricing.py b/src/pricing.py
+--- a/src/pricing.py
++++ b/src/pricing.py
+@@ -1,2 +1,2 @@
+-def total_price(items, **kwargs):
++def total_price(items):
+     return sum(items)
+"""
+    symbols = extract_changed_symbols(diff)
+
+    assert len(symbols) == 1
+    assert "removed parameter(s) kwargs" in symbols[0].change
+
+
+def test_class_declaration_change_is_reported_as_semantic_change():
+    diff = """diff --git a/src/pricing.py b/src/pricing.py
+--- a/src/pricing.py
++++ b/src/pricing.py
+@@ -1,2 +1,2 @@
+-class Pricing(Base):
++class Pricing(Base, Mixin):
+     pass
+"""
+    symbols = extract_changed_symbols(diff)
+
+    assert len(symbols) == 1
+    symbol = symbols[0]
+    assert symbol.name == "Pricing"
+    assert symbol.kind_hint == "semantic_change"
+    assert symbol.change == "declaration changed"
 
 
 def test_unparseable_signature_fragments_are_still_reported_not_silently_dropped():
@@ -284,6 +364,19 @@ def test_call_site_discovery_excludes_files_already_in_the_diff():
     assert len(model.prompts) == 1
     assert "shop/invoice.py:44" in model.prompts[0]
     assert "src/pricing.py:1" not in model.prompts[0]
+
+
+def test_malformed_grep_lines_are_skipped_without_raising():
+    git = FakeGit(
+        responses={
+            "total_price": "Binary file src/blob.bin matches\nshop/invoice.py:44:total_price(items)\n"
+        }
+    )
+    model = RecordingModel([BLAST_RESPONSE_ONE_BREAK])
+
+    analyze_blast_radius(make_pr(), SIGNATURE_DIFF, model, git, REPO_ROOT)
+
+    assert "shop/invoice.py:44" in model.prompts[0]
 
 
 def test_git_grep_is_scoped_to_the_given_repo_root():
