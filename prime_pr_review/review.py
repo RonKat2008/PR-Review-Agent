@@ -295,8 +295,16 @@ def render_markdown(pr: PullRequest, verdict: Verdict, lane: str) -> str:
         lines.append("")
 
     scope = verdict.scope
-    if scope and scope.unrelated:
-        lines.append(f"#### Changes unrelated to the stated intent ({len(scope.unrelated)})")
+    if scope:
+        # Always render when a scope exists, even when everything aligned. A clean
+        # result and a check that never ran must not look the same to the reader.
+        count = len(scope.unrelated)
+        heading = (
+            f"#### Changes unrelated to the stated intent ({count})"
+            if count
+            else "#### Scope — every change serves the stated intent"
+        )
+        lines.append(heading)
         lines.append("")
         lines.append(f"> Stated intent: {scope.intent}")
         lines.append("")

@@ -84,10 +84,15 @@ class PullRequestOutcome:
         worst = self.verdict.worst_severity
         severity = f" [{worst.value}]" if worst else ""
         status = "posted" if self.posted else f"held ({self.reason})"
-        return (
+        line = (
             f"PR #{self.pr.number}{severity} — {bugs} introduced, {fixes} fixed, "
             f"{self.verdict.confidence:.0%} confidence — {status}"
         )
+        # Degraded enrichment must be visible. Otherwise "the intent check found
+        # nothing" and "the intent check silently failed" produce identical output.
+        if self.notes:
+            line += f"  [{'; '.join(self.notes)}]"
+        return line
 
 
 @dataclass(frozen=True)
