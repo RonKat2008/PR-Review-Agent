@@ -246,7 +246,11 @@ def test_merged_lane_queries_with_lookback_and_sets_cursor(tmp_path):
 
     assert report.reviewed == 1
     assert state.merged_cursor == NOW.isoformat()
-    assert "merged:>=2026-07-31" in " ".join(gh.calls[0][0])
+    # Filtering is client-side on mergedAt, not via --search: the search index is
+    # eventually consistent and would hide a just-merged PR from this sweep.
+    args = " ".join(gh.calls[0][0])
+    assert "--state merged" in args
+    assert "--search" not in args
 
 
 def test_open_lane_does_not_set_a_merged_cursor(tmp_path):
