@@ -255,6 +255,125 @@ ran rather than silently finding nothing.
 on the symbol name, which over-matches. Accept the noise initially — a false "check this
 caller" costs a glance; a missed break costs an incident.
 
+### P10 — Repository knowledge graph ★ upgrades P1 and P9 from string matching to structure
+
+**Problem:** P1 finds call sites with `git grep`, which matches text. Search for `save`
+and you hit `save`, `autosave`, `saveDraft`, and a comment. P9 inherits the same
+imprecision. Neither can answer "what else depends on this" — only "what else mentions
+this string."
+
+A persistent graph of the repository answers structural questions directly.
+
+**Schema.** Two node kinds and two very different edge kinds:
+
+```
+NODES    file · module · function · class · test
+
+EDGES
+  static     imports · calls · inherits · tests · defines
+             (from AST — precise, explicit coupling)
+
+  temporal   co_changes_with(weight, sample_size)
+             (from git history — implicit coupling nothing static can see)
+```
+
+**The temporal edges are the ones that earn this feature.** Static analysis finds
+coupling the code declares. Git history finds coupling the code *hides*: the config file
+that must change with the parser, the schema and its migration, the fixture that goes
+stale, the doc nobody updates. Mining `git log --name-only` for files that change
+together produces a finding class no analyzer can reach:
+
+> ⚠️ `parser.py` and `grammar.toml` changed together in **14 of the last 16** commits.
+> This PR changes `parser.py` alone.
+
+That is frequently a real bug, and no amount of reading the diff would reveal it.
+
+**Implementation:**
+
+| Step | How |
+|---|---|
+| Build | `ast` for Python (exact); tree-sitter for other languages |
+| Co-change mining | `git log --name-only --pretty=format:%H` → pairwise co-occurrence, weighted by recency |
+| Store | SQLite, `nodes(id, kind, path, name)` + `edges(src, dst, kind, weight)` — no server, and it diffs well |
+| Update | Incremental. Reparse only files touched since the last stored commit SHA |
+| Query | For changed symbols, pull the k-hop neighborhood (k=2 default) and render into the prompt |
+
+**What it upgrades:**
+- **P1** — call sites become graph edges, not grep hits. Over-matching disappears.
+- **P9** — blast radius traverses real `calls` edges. Precision improves; the "accept
+  noise deliberately" tradeoff can be relaxed.
+- **New** — co-change findings, described above.
+
+**Prior art already installed:** GSD ships a `gsd-graphify` skill that builds a project
+knowledge graph into `.planning/graphs/`. Worth reading before building from scratch —
+this may be largely a matter of pointing an existing tool at the reviewed repo.
+
+**Cost note:** the graph is built once and updated incrementally, so it is cheap per
+sweep. The initial build on a large repo is the expensive part; do it in CI, cache it.
+
+### P11 — Contribution and review-outcome tracking
+
+**The useful core:** the system already produces per-PR data it currently throws away —
+what was found, what was confirmed, what was rejected, what shipped and then broke. Kept
+over time, that data answers questions worth answering.
+
+**The hazard, stated once.** Ranking people as "best" and "worst" on this data has three
+problems, and I would not ship the leaderboard version by default:
+
+1. **The signal is not ground truth.** These are LLM findings. We measured this exact
+   system returning 95% confidence on all four demo PRs *including one where it found
+   nothing*. Ranking humans on an unvalidated model's output is building a performance
+   system on a foundation we know is not yet calibrated.
+2. **Defect counts track difficulty and volume, not skill.** Whoever maintains the
+   gnarliest legacy module will always look worst. The person who ships nothing looks
+   best. This is the classic failure of defect-density metrics.
+3. **Measurement changes behavior.** A visible ranking teaches people to avoid hard
+   work, split PRs to dilute counts, and stop volunteering for risky refactors. Also
+   worth checking your jurisdiction — automated evaluation of workers carries real
+   compliance obligations in several.
+
+**The reframe that keeps the value:** track **outcomes on changes and code areas**,
+not rankings of humans. Same data, different unit of analysis, and it is actually more
+useful for the agent.
+
+**What to record**, per PR, in `state/contributions.db`:
+
+| Metric | Why it is trustworthy |
+|---|---|
+| **Reverted or hotfixed within N days** | The only real ground-truth defect signal here. A human decided it was broken. |
+| Findings raised / confirmed / rejected | Measures **the agent's** calibration, not the author's |
+| Review iterations before merge | Proxy for clarity of the change |
+| PR size, files touched, blast radius | The **difficulty normalizer** — without it every other metric is noise |
+| Test coverage delta | Did the change carry its own verification |
+| Area of code touched | Where defects actually cluster |
+
+**What to do with it — three uses that need no ranking:**
+
+1. **Calibrate the agent.** If findings in `shop/legacy/` are rejected 80% of the time,
+   the agent is miscalibrated for that area — raise its confidence bar there. This makes
+   the bot better and blames nobody.
+2. **Route review depth.** Spend more model budget on areas with a high historical
+   revert rate, and on changes with large blast radius. Skip deep review on
+   documentation-only PRs.
+3. **Suggest reviewers.** "Who has the most context on this file" is a graph+history
+   query (pairs naturally with P10) and is genuinely helpful.
+
+**Config, defaulting to safe:**
+
+```toml
+[contributions]
+enabled = true
+track_reverts = true
+# Per-person aggregates. OFF by default. See the hazard notes in P11 before enabling.
+per_author_stats = false
+# Never post contributor statistics into a PR comment.
+visibility = "local"    # local | digest | never
+```
+
+If you do want per-author data, my recommendation is: keep it **local and private**,
+normalize every metric by PR size and area difficulty, report ranges rather than ranks,
+and never surface it in a PR comment where it becomes a public judgment of a colleague.
+
 ### P7 — Per-file fan-out for large PRs
 
 Current behavior truncates at `max_diff_bytes` on file boundaries — a 50-file PR gets partially reviewed with no signal about what was dropped. Instead, above a threshold, spawn one subagent per file and merge. Uses the same `rlm()` recursion as P2.
@@ -311,6 +430,13 @@ file.
 - **HIGH · `shop/auth.py:22-31`** — changes the session timeout from 30m to 24h.
   Nothing in the title or body mentions auth. Either split this into its own PR
   or say why it belongs here.
+
+---
+
+### 🕸️ Coupling
+
+⚠️ `parser.py` and `grammar.toml` changed together in **14 of the last 16** commits.
+This PR changes `parser.py` alone. Intentional?
 
 ---
 
@@ -413,6 +539,8 @@ Notably: **B removes prime-agent's scheduling role entirely** — GitHub's event
 | **3** | P2 ensemble · P7 fan-out | Precision | **M** |
 | **4** | GitHub Actions (option B) | Real bot | **S** |
 | **5** | P6 feedback loop | Improves over time | **S** |
+| **6** | **P10 knowledge graph** | Structure replaces string matching; co-change findings | **L** |
+| **7** | **P11 outcome tracking** | Calibration and review routing | **M** |
 
 Phase 0 is not optional — three of its items are known-broken or never-executed paths.
 
@@ -431,6 +559,10 @@ Phase 0 is not optional — three of its items are known-broken or never-execute
 | `REQUEST_CHANGES` blocking a teammate wrongly | Low | **High** | Off by default; CRITICAL only; requires explicit opt-in |
 | prime-agent Windows instability | **High** | Low | Already bypassed — pipeline is plain Python |
 | Demo answer key overfits | **High** | Medium | Expand corpus to 20+ PRs incl. real merged history before trusting numbers |
+| Knowledge graph goes stale and misleads | Medium | Medium | Store the commit SHA the graph was built at; refuse to use a graph older than the base commit rather than serving stale edges |
+| Graph build cost on a large repo | Medium | Low | Build once in CI and cache; sweeps only update incrementally |
+| **Contributor metrics used as performance review** | **Medium** | **High** | `per_author_stats` off by default; `visibility = "local"`; never posted to a PR; normalize by size and area difficulty; see the P11 hazard notes |
+| Ranking built on uncalibrated LLM findings | **High** if enabled | **High** | Gate any per-author reporting behind a measured finding-acceptance rate; revert/hotfix is the only ground-truth signal |
 
 ---
 
