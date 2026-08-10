@@ -57,6 +57,18 @@ class ReviewConfig:
     bot_login: str
     ignore_paths: tuple[str, ...]
     max_diff_bytes: int
+    # Local checkout of the REVIEWED repository. Call-site discovery uses `git grep`
+    # and sibling-test discovery globs the filesystem, so both need the target repo
+    # on disk. Empty means unavailable — pointing this at the wrong checkout would
+    # return call sites from an unrelated codebase, which is worse than none.
+    repo_root: str = ""
+    # Feed the reviewer full changed files, call sites, sibling tests, and repo
+    # conventions alongside the diff. Requires repo_root for the local parts.
+    gather_context: bool = True
+    # Byte budget for that context, split across its sections.
+    max_context_bytes: int = 400_000
+    # Run the two-pass intent check: does the diff do what the PR claims?
+    check_intent: bool = True
 
 
 @dataclass(frozen=True)
@@ -120,6 +132,10 @@ def _build_config(raw: dict) -> Config:
             bot_login=str(review.get("bot_login", "")).strip(),
             ignore_paths=tuple(review.get("ignore_paths", ())),
             max_diff_bytes=int(review.get("max_diff_bytes", 200_000)),
+            repo_root=str(review.get("repo_root", "")).strip(),
+            gather_context=bool(review.get("gather_context", True)),
+            max_context_bytes=int(review.get("max_context_bytes", 400_000)),
+            check_intent=bool(review.get("check_intent", True)),
         ),
         sinks=SinkConfig(
             pr_comment=bool(sinks.get("pr_comment", True)),

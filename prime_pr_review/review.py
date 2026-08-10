@@ -294,6 +294,37 @@ def render_markdown(pr: PullRequest, verdict: Verdict, lane: str) -> str:
                 lines.append(f"  - {finding.evidence}")
         lines.append("")
 
+    scope = verdict.scope
+    if scope and scope.unrelated:
+        lines.append(f"#### Changes unrelated to the stated intent ({len(scope.unrelated)})")
+        lines.append("")
+        lines.append(f"> Stated intent: {scope.intent}")
+        lines.append("")
+        for issue in sorted(scope.unrelated, key=lambda i: i.severity.rank):
+            location = f"{issue.file}:{issue.lines}" if issue.lines else issue.file
+            lines.append(f"- **{issue.severity.value}** `{location}` — {issue.claim}")
+            if issue.evidence:
+                lines.append(f"  - {issue.evidence}")
+        lines.append("")
+
+    if verdict.blast_radius:
+        checked = verdict.callers_checked
+        broken = len(verdict.broken_callers)
+        lines.append("#### Blast radius")
+        lines.append("")
+        # Reporting the total checked distinguishes "found nothing" from
+        # "silently did not run" — they look identical otherwise.
+        lines.append(f"Checked **{checked}** call site(s). **{broken}** break.")
+        lines.append("")
+        for entry in verdict.blast_radius:
+            for caller in entry.breaks:
+                location = caller.file + (f":{caller.line}" if caller.line else "")
+                lines.append(
+                    f"- **{caller.severity.value}** `{location}` "
+                    f"(`{entry.symbol}`, {entry.kind}) — {caller.claim}"
+                )
+        lines.append("")
+
     if verdict.fixes:
         lines.append(f"#### Bugs fixed ({len(verdict.fixes)})")
         lines.append("")

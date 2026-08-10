@@ -11,14 +11,16 @@ in the digest rather than swallowed.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import context as context_mod
 from . import github
 from .config import Config, Secrets
 from .diffs import filter_diff
 from .github import PullRequest
+from .intent import IntentError, run_intent_check
 from .review import Verdict, VerdictError, parse_verdict, render_markdown
 from .sinks import CommentBudget, DEFAULT_REVIEWS_DIR, post_pr_comment, write_local
 from .state import (
@@ -30,8 +32,31 @@ from .state import (
     set_merged_cursor,
 )
 
-# (pull_request, filtered_diff, lane) -> raw verdict JSON text
+# (pull_request, review_payload, lane) -> raw verdict JSON text.
+# The payload is the filtered diff plus any gathered repository context, so the
+# reviewer contract never had to change to accommodate enrichment.
 Reviewer = Callable[[PullRequest, str, str], str]
+
+# (prompt) -> raw model response. Used for analysis passes that are not the review
+# itself, such as the intent check.
+ModelFn = Callable[[str], str]
+
+DEFAULT_PROMPTS_DIR = Path("skills/pr-review/prompts")
+
+
+@dataclass(frozen=True)
+class Enrichment:
+    """Optional analysis layered on top of the diff before the review runs.
+
+    Absent (the default) means the reviewer sees only the diff, which is the
+    behavior every existing test asserts. Enrichment never fails a review: if
+    context gathering or the intent check errors, the review proceeds without it
+    and the reason is recorded on the outcome.
+    """
+
+    model_fn: ModelFn | None = None
+    repo_root: Path = Path(".")
+    prompts_dir: Path = DEFAULT_PROMPTS_DIR
 
 
 @dataclass(frozen=True)
@@ -43,6 +68,10 @@ class PullRequestOutcome:
     reason: str = ""
     local_path: Path | None = None
     error: str | None = None
+    # Enrichment that was attempted and failed. Non-fatal: the review still ran,
+    # just with less context than intended. Surfaced so a silently degraded
+    # review is distinguishable from a fully informed one.
+    notes: tuple[str, ...] = ()
 
     def summary_line(self) -> str:
         if self.error:
@@ -83,6 +112,7 @@ def sweep_lane(
     runner: github.GhRunner = github.default_runner,
     reviews_dir: Path | str = DEFAULT_REVIEWS_DIR,
     now: datetime | None = None,
+    enrichment: Enrichment | None = None,
 ) -> tuple[SweepReport, State]:
     """Review every eligible PR in one lane. Returns the report and the advanced state."""
     repo_slug = config.repo.slug
@@ -99,7 +129,7 @@ def sweep_lane(
             continue
 
         outcome, budget = _review_one(
-            config, lane, pr, reviewer, budget, runner, repo_slug, reviews_dir
+            config, lane, pr, reviewer, budget, runner, repo_slug, reviews_dir, enrichment
         )
         outcomes.append(outcome)
         if outcome.error is None:
@@ -122,6 +152,7 @@ def _review_one(
     runner: github.GhRunner,
     repo_slug: str,
     reviews_dir: Path | str,
+    enrichment: Enrichment | None = None,
 ) -> tuple[PullRequestOutcome, CommentBudget]:
     """Review a single PR, converting any failure into a recorded outcome."""
     try:
@@ -136,12 +167,17 @@ def _review_one(
             budget,
         )
 
+    payload, notes = _build_payload(config, pr, filtered.text, repo_slug, runner, enrichment)
+
     try:
-        verdict = parse_verdict(reviewer(pr, filtered.text, lane))
+        verdict = parse_verdict(reviewer(pr, payload, lane))
     except VerdictError as exc:
         return PullRequestOutcome(pr=pr, lane=lane, error=f"unusable verdict: {exc}"), budget
     except Exception as exc:  # noqa: BLE001 - a subagent may fail in any manner
         return PullRequestOutcome(pr=pr, lane=lane, error=f"reviewer failed: {exc}"), budget
+
+    verdict, scope_notes = _attach_scope(config, pr, filtered.text, verdict, enrichment)
+    notes += scope_notes
 
     body = render_markdown(pr, verdict, lane)
     local_path = write_local(pr, verdict, body, lane, reviews_dir) if config.sinks.local_file else None
@@ -155,9 +191,71 @@ def _review_one(
             posted=outcome.posted,
             reason=outcome.reason,
             local_path=local_path,
+            notes=notes,
         ),
         outcome.budget,
     )
+
+
+def _build_payload(
+    config: Config,
+    pr: PullRequest,
+    diff: str,
+    repo_slug: str,
+    runner: github.GhRunner,
+    enrichment: Enrichment | None,
+) -> tuple[str, tuple[str, ...]]:
+    """Diff plus repository context, when enabled and available.
+
+    Enrichment is best-effort by design. A repo we cannot read, a git binary that
+    is missing, an API that rate-limits — none of those should cost us the review
+    entirely. We degrade to the bare diff and say so.
+    """
+    if enrichment is None or not config.review.gather_context:
+        return diff, ()
+
+    # Call-site discovery shells out to `git grep`, which runs in the process's
+    # working directory. Without a configured checkout of the reviewed repo we
+    # would be grepping whatever repo the sweep happens to run from and reporting
+    # its matches as call sites of the PR's symbols. Confidently wrong beats
+    # nothing only in the wrong direction, so skip instead.
+    if not config.review.repo_root:
+        return diff, ("context skipped: review.repo_root is not set",)
+
+    try:
+        gathered = context_mod.gather_context(
+            repo_slug=repo_slug,
+            head_sha=pr.head_sha,
+            diff=diff,
+            repo_root=enrichment.repo_root,
+            gh_runner=runner,
+            max_bytes=config.review.max_context_bytes,
+        )
+    except Exception as exc:  # noqa: BLE001 - degrade, never fail the review
+        return diff, (f"context unavailable: {exc}",)
+
+    return f"{diff}\n\n{gathered.render()}", gathered.dropped
+
+
+def _attach_scope(
+    config: Config,
+    pr: PullRequest,
+    diff: str,
+    verdict: Verdict,
+    enrichment: Enrichment | None,
+) -> tuple[Verdict, tuple[str, ...]]:
+    """Run the two-pass intent check and attach its Scope to the verdict."""
+    if enrichment is None or enrichment.model_fn is None or not config.review.check_intent:
+        return verdict, ()
+
+    try:
+        scope = run_intent_check(pr, diff, enrichment.model_fn, enrichment.prompts_dir)
+    except IntentError as exc:
+        return verdict, (f"intent check unusable: {exc}",)
+    except Exception as exc:  # noqa: BLE001 - degrade, never fail the review
+        return verdict, (f"intent check failed: {exc}",)
+
+    return replace(verdict, scope=scope), ()
 
 
 def _select_candidates(

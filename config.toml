@@ -48,6 +48,28 @@ ignore_paths = [
 # Diffs larger than this are truncated with a marker (token guard).
 max_diff_bytes = 200000
 
+# --- Context gathering (P1) -------------------------------------------------
+# Give the reviewer more than the diff: the full changed files, call sites of
+# changed symbols, sibling tests, and the repo's own conventions.
+#
+# repo_root must point at a local checkout of the REVIEWED repository. Call-site
+# discovery shells out to `git grep` and sibling-test discovery globs the disk,
+# so both need the target repo present. Left empty, those two sections are
+# skipped — pointing it at the wrong checkout would surface call sites from an
+# unrelated codebase, which is worse than surfacing none.
+#
+# Under GitHub Actions this is simply the workspace, so it becomes automatic.
+# TODO: set when you have the target repo cloned locally.
+repo_root = ""
+gather_context = true
+max_context_bytes = 400000
+
+# --- Intent alignment (P8) --------------------------------------------------
+# Two-pass check: does the diff do what the PR says it does? Pass 1 derives the
+# intent from title/body/commits with the diff withheld; pass 2 judges the diff
+# against that fixed statement.
+check_intent = true
+
 [sinks]
 pr_comment = true       # gated by review.dry_run
 webhook = false         # no webhook URL configured yet

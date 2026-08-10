@@ -7,6 +7,7 @@ is deterministic. Swapping providers means swapping one function.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -58,34 +59,67 @@ def gemini_reviewer(
         except OSError as exc:
             raise ReviewerError(f"Could not read prompt {template_path}: {exc}") from exc
 
-        payload = {
-            "contents": [{"parts": [{"text": build_prompt(template, pr, diff)}]}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "responseMimeType": "application/json",
-            },
-        }
-
-        owns_client = client is None
-        http = client or httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS)
-        try:
-            response = http.post(
-                GEMINI_ENDPOINT.format(model=model),
-                params={"key": api_key},
-                json=payload,
-            )
-            if response.status_code >= 400:
-                raise ReviewerError(
-                    f"Gemini returned {response.status_code}: {response.text[:300]}"
-                )
-            return _extract_text(response.json())
-        except httpx.HTTPError as exc:
-            raise ReviewerError(f"Gemini request failed: {exc}") from exc
-        finally:
-            if owns_client:
-                http.close()
+        return post_gemini(api_key, model, build_prompt(template, pr, diff), client)
 
     return reviewer
+
+
+def gemini_model_fn(
+    api_key: str,
+    model: str = DEFAULT_GEMINI_MODEL,
+    client: httpx.Client | None = None,
+) -> Callable[[str], str]:
+    """A raw prompt-to-text callable.
+
+    Used by analysis passes that are not the review itself — the intent check and
+    blast-radius judgement build their own prompts and do not want the reviewer's
+    lane template wrapped around them.
+    """
+
+    def call(prompt: str) -> str:
+        return post_gemini(api_key, model, prompt, client)
+
+    return call
+
+
+def post_gemini(
+    api_key: str,
+    model: str,
+    prompt: str,
+    client: httpx.Client | None = None,
+) -> str:
+    """One Gemini call. `responseMimeType: application/json` constrains the model to
+    emit a bare JSON object, which is the shape every consumer here expects."""
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.post(
+            GEMINI_ENDPOINT.format(model=model),
+            params={"key": api_key},
+            json=payload,
+        )
+        if response.status_code >= 400:
+            # Name the model explicitly rather than trusting the upstream body to
+            # mention it. A retired model id already cost one full sweep; an opaque
+            # gateway error would otherwise leave no clue which model was wrong.
+            raise ReviewerError(
+                f"Gemini returned {response.status_code} for model {model!r}: "
+                f"{response.text[:300]}"
+            )
+        return _extract_text(response.json())
+    except httpx.HTTPError as exc:
+        raise ReviewerError(f"Gemini request failed: {exc}") from exc
+    finally:
+        if owns_client:
+            http.close()
 
 
 def _extract_text(body: dict) -> str:

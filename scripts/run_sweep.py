@@ -17,14 +17,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from prime_pr_review.config import ConfigError, load_config, require_repo  # noqa: E402
-from prime_pr_review.reviewers import gemini_reviewer  # noqa: E402
+from prime_pr_review.reviewers import gemini_model_fn, gemini_reviewer  # noqa: E402
 from prime_pr_review.state import (  # noqa: E402
     LANE_MERGED,
     LANE_OPEN,
     load_state,
     save_state,
 )
-from prime_pr_review.sweep import sweep_lane  # noqa: E402
+from prime_pr_review.sweep import Enrichment, sweep_lane  # noqa: E402
 
 AUTH_FILE = Path.home() / ".prime" / "agent" / "auth.json"
 
@@ -81,8 +81,14 @@ def main() -> int:
     mode = "DRY RUN (nothing posts)" if config.review.dry_run else "LIVE (will comment)"
     print(f"Sweeping {repo.slug} | lane={args.lane} | model={args.model} | {mode}\n")
 
-    reviewer = gemini_reviewer(resolve_api_key(), model=args.model)
-    report, state = sweep_lane(config, args.lane, reviewer, state)
+    api_key = resolve_api_key()
+    reviewer = gemini_reviewer(api_key, model=args.model)
+    enrichment = Enrichment(
+        model_fn=gemini_model_fn(api_key, model=args.model),
+        repo_root=Path(config.review.repo_root or "."),
+    )
+
+    report, state = sweep_lane(config, args.lane, reviewer, state, enrichment=enrichment)
     save_state(state)
 
     for line in report.summaries():
