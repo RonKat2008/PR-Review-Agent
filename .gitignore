@@ -29,3 +29,5 @@ build/
 # OS
 Thumbs.db
 .DS_Store
+# Windows artifact from a stray `2>nul` redirect in a shell command
+nul
