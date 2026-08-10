@@ -21,6 +21,7 @@ from .conftest import (
     VERDICT_LOW_CONFIDENCE,
     VERDICT_WITH_BUG,
     is_list_comments,
+    is_post_review,
     is_pr_comment,
     is_pr_diff,
     is_pr_list,
@@ -44,6 +45,7 @@ def gh_with(*prs, diff: str = SAMPLE_DIFF, comments: str = "") -> FakeGh:
         .on(is_pr_list, pr_list_json(*prs))
         .on(is_pr_diff, diff)
         .on(is_list_comments, comments)
+        .on(is_post_review, "")
         .on(is_pr_comment, "")
     )
 
@@ -117,6 +119,32 @@ def test_skips_bot_authored_prs_before_spending_tokens(tmp_path):
 
     assert report.skipped == 1
     assert calls == [], "reviewer must never run on a skipped PR"
+
+
+def test_findings_are_delivered_as_line_anchored_review_comments(tmp_path):
+    """Delivery goes through the reviews API, not a single trailing comment."""
+    gh = gh_with(make_pr(number=1))
+
+    report, _ = sweep_lane(
+        make_config(), LANE_OPEN, reviewer_returning(VERDICT_WITH_BUG),
+        State.empty(), gh, tmp_path, NOW,
+    )
+
+    assert report.posted == 1
+    assert gh.calls_matching("/reviews"), "expected a reviews API call"
+    assert gh.calls_matching("pr comment") == [], "must not also post a summary comment"
+
+
+def test_inline_comments_can_be_turned_off(tmp_path):
+    gh = gh_with(make_pr(number=1))
+
+    sweep_lane(
+        make_config(inline_comments=False), LANE_OPEN,
+        reviewer_returning(VERDICT_WITH_BUG), State.empty(), gh, tmp_path, NOW,
+    )
+
+    assert gh.calls_matching("pr comment"), "expected the summary-comment fallback"
+    assert gh.calls_matching("/reviews") == []
 
 
 def test_dry_run_writes_locally_but_never_posts(tmp_path):

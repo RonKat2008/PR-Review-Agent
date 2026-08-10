@@ -69,6 +69,8 @@ def make_config(
     webhook: bool = True,
     local_file: bool = True,
     webhook_kind: str = "slack",
+    inline_comments: bool = True,
+    allow_request_changes: bool = False,
 ) -> Config:
     return Config(
         repo=RepoConfig(owner=owner, name=name),
@@ -81,12 +83,14 @@ def make_config(
             bot_login=bot_login,
             ignore_paths=ignore_paths,
             max_diff_bytes=max_diff_bytes,
+            allow_request_changes=allow_request_changes,
         ),
         sinks=SinkConfig(
             pr_comment=pr_comment,
             webhook=webhook,
             local_file=local_file,
             webhook_kind=webhook_kind,
+            inline_comments=inline_comments,
         ),
     )
 
@@ -175,6 +179,11 @@ def is_pr_comment(args: Sequence[str]) -> bool:
 
 def is_list_comments(args: Sequence[str]) -> bool:
     return args[0] == "api" and "issues" in " ".join(args)
+
+
+def is_post_review(args: Sequence[str]) -> bool:
+    """The reviews API call used for line-anchored comments with suggestions."""
+    return args[0] == "api" and "/reviews" in " ".join(args)
 
 
 @pytest.fixture

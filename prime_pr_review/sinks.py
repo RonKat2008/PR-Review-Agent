@@ -16,7 +16,7 @@ from typing import Sequence
 
 import httpx
 
-from . import github
+from . import github, reviews_api
 from .config import Config, Secrets
 from .github import PullRequest
 from .review import Verdict, passes_gate
@@ -106,8 +106,15 @@ def post_pr_comment(
     body: str,
     budget: CommentBudget,
     runner: github.GhRunner = github.default_runner,
+    diff: str | None = None,
 ) -> CommentOutcome:
-    """Post to GitHub if every gate allows it. Returns the outcome and updated budget."""
+    """Post to GitHub if every gate allows it. Returns the outcome and updated budget.
+
+    With `diff` supplied and inline comments enabled, findings are delivered as
+    line-anchored review comments carrying committable suggestions, and the summary
+    body absorbs whatever could not be anchored. Without it, a single summary
+    comment is posted — the original behavior.
+    """
     repo_slug = config.repo.slug
 
     existing: Sequence[str] = ()
@@ -123,11 +130,42 @@ def post_pr_comment(
         return CommentOutcome(False, decision.reason, budget)
 
     try:
-        github.post_comment(repo_slug, pr.number, body, runner)
+        if diff is not None and config.sinks.inline_comments:
+            _post_inline_review(config, pr, verdict, body, diff, runner)
+        else:
+            github.post_comment(repo_slug, pr.number, body, runner)
     except github.GitHubError as exc:
         return CommentOutcome(False, f"post failed: {exc}", budget)
 
     return CommentOutcome(True, "posted", budget.spend())
+
+
+def _post_inline_review(
+    config: Config,
+    pr: PullRequest,
+    verdict: Verdict,
+    body: str,
+    diff: str,
+    runner: github.GhRunner,
+) -> None:
+    """Deliver findings as line-anchored review comments.
+
+    Findings whose line GitHub would reject are not dropped: they stay in the
+    summary body, which is the whole rendered review. Anchoring is an enhancement
+    to delivery, never a filter on content.
+    """
+    commentable = reviews_api.commentable_lines(diff)
+    comments, unanchored = reviews_api.build_review_comments(verdict.introduces, commentable)
+
+    summary = body
+    if unanchored:
+        summary += (
+            f"\n\n<sub>{len(unanchored)} finding(s) could not be anchored to a "
+            f"changed line and appear above in full.</sub>"
+        )
+
+    event = reviews_api.review_event_for(verdict, config.review.allow_request_changes)
+    reviews_api.post_review(config.repo.slug, pr.number, summary, comments, event, runner)
 
 
 def write_local(

@@ -191,7 +191,7 @@ def _review_one(
 
     body = render_review(pr, verdict, lane)
     local_path = write_local(pr, verdict, body, lane, reviews_dir) if config.sinks.local_file else None
-    outcome = post_pr_comment(config, pr, verdict, body, budget, runner)
+    outcome = post_pr_comment(config, pr, verdict, body, budget, runner, diff=filtered.text)
 
     return (
         PullRequestOutcome(

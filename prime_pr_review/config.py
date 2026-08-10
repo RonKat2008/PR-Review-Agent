@@ -72,6 +72,11 @@ class ReviewConfig:
     # Run blast-radius analysis: what else does this change break? Needs repo_root,
     # since call-site discovery shells out to `git grep`.
     check_blast: bool = True
+    # Allow a CRITICAL finding or a broken caller to submit REQUEST_CHANGES, which
+    # blocks the merge under branch protection. Off by default: automatically
+    # blocking a colleague's merge is a strong action and should be chosen, not
+    # inherited from a default.
+    allow_request_changes: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,9 @@ class SinkConfig:
     webhook: bool
     local_file: bool
     webhook_kind: str
+    # Deliver findings as line-anchored review comments with committable
+    # suggestions rather than one summary comment at the bottom of the PR.
+    inline_comments: bool = True
 
 
 @dataclass(frozen=True)
@@ -140,12 +148,14 @@ def _build_config(raw: dict) -> Config:
             max_context_bytes=int(review.get("max_context_bytes", 400_000)),
             check_intent=bool(review.get("check_intent", True)),
             check_blast=bool(review.get("check_blast", True)),
+            allow_request_changes=bool(review.get("allow_request_changes", False)),
         ),
         sinks=SinkConfig(
             pr_comment=bool(sinks.get("pr_comment", True)),
             webhook=bool(sinks.get("webhook", True)),
             local_file=bool(sinks.get("local_file", True)),
             webhook_kind=str(sinks.get("webhook_kind", "slack")),
+            inline_comments=bool(sinks.get("inline_comments", True)),
         ),
     )
 
