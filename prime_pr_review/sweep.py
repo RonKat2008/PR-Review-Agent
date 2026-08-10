@@ -22,7 +22,8 @@ from .config import Config, Secrets
 from .diffs import filter_diff
 from .github import PullRequest
 from .intent import IntentError, run_intent_check
-from .review import Verdict, VerdictError, parse_verdict, render_markdown
+from .review import Verdict, VerdictError, parse_verdict
+from .template import render_review
 from .sinks import CommentBudget, DEFAULT_REVIEWS_DIR, post_pr_comment, write_local
 from .state import (
     LANE_MERGED,
@@ -188,7 +189,7 @@ def _review_one(
     verdict, blast_notes = _attach_blast(config, pr, filtered.text, verdict, enrichment)
     notes += blast_notes
 
-    body = render_markdown(pr, verdict, lane)
+    body = render_review(pr, verdict, lane)
     local_path = write_local(pr, verdict, body, lane, reviews_dir) if config.sinks.local_file else None
     outcome = post_pr_comment(config, pr, verdict, body, budget, runner)
 

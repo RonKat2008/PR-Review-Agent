@@ -133,8 +133,8 @@ def _render_scope(scope: Scope | None) -> str | None:
         return "\n".join(lines)
 
     count = len(scope.unrelated)
-    noun = "change" if count == 1 else "changes"
-    lines.append(f"⚠️ **{count} {noun} do not serve that intent**")
+    noun, verb = ("change", "does") if count == 1 else ("changes", "do")
+    lines.append(f"⚠️ **{count} {noun} {verb} not serve that intent**")
     lines.append("")
     lines.extend(_render_scope_issue(issue) for issue in _sorted_scope_issues(scope.unrelated))
     return "\n".join(lines)
