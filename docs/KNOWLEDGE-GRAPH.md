@@ -103,6 +103,54 @@ any repo in any language.
 
 ---
 
+## Architecture — four tiers, adopted in order
+
+The reviewer consumes only the JSON schema above. Every producer gets an adapter. That
+single constraint is what makes the tiers below independently adoptable: you can start
+at Tier 1 and add Tier 2 later without touching any review logic.
+
+| Tier | Layer | Tool | Adopt when |
+|---|---|---|---|
+| **0** | Temporal coupling | ours (`build_cochange.py`) | **now** — nothing else does it, zero dependencies |
+| **1** | Syntactic structure | CodeGraph (tree-sitter + SQLite) | **now** — 20+ languages, no setup |
+| **2** | Semantic symbols | SCIP indexers | when tree-sitter resolution starts producing false call edges |
+| **3** | Data flow / taint | CodeQL | only if licensed — see below |
+
+### Why Tier 2 exists
+
+Tree-sitter is **syntactic**: it parses reliably but cannot always resolve *which*
+`save` a call refers to across module boundaries. SCIP does **semantic** resolution.
+
+That distinction is unusually important here. This reviewer's core claim is "this PR
+breaks these four callers." If the call edges are guesses, the output is confidently
+wrong — the exact failure mode the entire plan is built to avoid. Precision is the
+product, so Tier 2 is a real upgrade rather than polish.
+
+SCIP indexer maturity varies by language; `scip-python`, `scip-typescript`, and
+`scip-java` are the solid ones.
+
+### Tier 3 is license-gated — check before designing around it
+
+CodeQL would upgrade the SQL-injection finding from *pattern match* to *proven taint
+path*. But:
+
+> The CodeQL CLI is free on **public** repositories. Private repositories require a
+> GitHub Code Security license; analyzing closed-source code requires a separate
+> commercial license.
+
+For a private company repo that is a hard gate. Also, CodeQL database builds take
+minutes to hours, so even when licensed it belongs on security-relevant diffs only,
+never on every sweep.
+
+### What we are deliberately NOT doing
+
+**A graph database.** SQLite handles repo-scale graphs comfortably and CodeGraph already
+demonstrates that shape. Neo4j or similar buys query expressiveness we have no measured
+bottleneck for, at the cost of an operational dependency. Revisit when there is a
+profile showing a problem, not before.
+
+---
+
 ## How to produce one — don't hand-roll it
 
 The graph has two halves, and **no single tool does both**. Use a mature tool for the
