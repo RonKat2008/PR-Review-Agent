@@ -181,8 +181,14 @@ def write_local(
     body: str,
     lane: str,
     reviews_dir: Path | str = DEFAULT_REVIEWS_DIR,
+    notes: Sequence[str] = (),
 ) -> Path:
-    """Write the review to disk. Always runs — this is the audit trail."""
+    """Write the review to disk. Always runs — this is the audit trail.
+
+    `notes` records enrichment activity and degradations (graph counts, skipped
+    passes, suppressions), making each review file self-describing: what the
+    model was actually given is part of the record, not just what it concluded.
+    """
     directory = Path(reviews_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -198,6 +204,7 @@ def write_local(
             "introduces": len(verdict.introduces),
             "fixes": len(verdict.fixes),
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "notes": list(notes),
         },
         indent=2,
     )

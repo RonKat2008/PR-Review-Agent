@@ -311,6 +311,22 @@ def load_for_review(
 # --- queries ---------------------------------------------------------------------
 
 
+def activity_counts(
+    graph: KnowledgeGraph,
+    diff_files: Sequence[str],
+    changed_symbols: Sequence[str],
+) -> tuple[int, int]:
+    """(co-change warnings, caller edges) this graph contributes for one diff.
+
+    Observability for the sweep: 'the graph loaded' and 'the graph actually said
+    something' are different facts, and only the second proves the feature is
+    earning its place on a given PR. Counts mirror what `render` would inject.
+    """
+    warnings = len(co_change_warnings(graph, diff_files))
+    callers = sum(len(callers_of(graph, symbol)) for symbol in changed_symbols)
+    return warnings, callers
+
+
 def callers_of(graph: KnowledgeGraph, node_id: str) -> tuple[str, ...]:
     """Sources of every `calls` edge into `node_id`, sorted."""
     return tuple(

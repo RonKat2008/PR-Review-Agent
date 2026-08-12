@@ -161,6 +161,30 @@ def test_fresh_graph_evidence_is_injected_into_the_review_payload(tmp_path):
     assert "grammar.toml" in seen[0], "the co-change warning should name the partner"
 
 
+def test_graph_activity_is_counted_in_notes_and_front_matter(tmp_path):
+    """'Loaded and said nothing' vs 'loaded and warned' must be visible per PR."""
+    import json as _json
+
+    gh = gh_with(make_pr(number=1))
+    enrichment = Enrichment(git_runner=lambda args: "")
+
+    report, _ = sweep_lane(
+        make_config(graph_path=str(_graph_file(tmp_path))), LANE_OPEN,
+        reviewer_returning(VERDICT_WITH_BUG), State.empty(), gh, tmp_path, NOW,
+        enrichment=enrichment,
+    )
+
+    outcome = report.outcomes[0]
+    graph_notes = [n for n in outcome.notes if n.startswith("graph:")]
+    assert graph_notes, f"expected a graph activity note, got {outcome.notes}"
+    assert "1 co-change warning(s)" in graph_notes[0]
+
+    front = _json.loads(
+        outcome.local_path.read_text(encoding="utf-8").split("<!--")[1].split("-->")[0]
+    )
+    assert any(n.startswith("graph:") for n in front["notes"])
+
+
 def test_stale_graph_is_refused_with_a_visible_note(tmp_path):
     """When ancestry fails the graph is NOT used and the outcome says why."""
     from prime_pr_review.context import GitError

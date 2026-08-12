@@ -220,7 +220,11 @@ def _review_one(
     notes += suppression_notes
 
     body = render_review(pr, verdict, lane)
-    local_path = write_local(pr, verdict, body, lane, reviews_dir) if config.sinks.local_file else None
+    local_path = (
+        write_local(pr, verdict, body, lane, reviews_dir, notes=notes)
+        if config.sinks.local_file
+        else None
+    )
     outcome = post_pr_comment(config, pr, verdict, body, budget, runner, diff=filtered.text)
 
     return (
@@ -327,7 +331,11 @@ def _graph_section(
 
     diff_files = tuple(f.path for f in split_by_file(diff))
     symbol_ids = tuple(f"{s.file}::{s.name}" for s in extract_changed_symbols(diff))
-    return graph_mod.render(graph, diff_files, symbol_ids), ()
+    warnings, callers = graph_mod.activity_counts(graph, diff_files, symbol_ids)
+    # A positive note on purpose: "loaded and said nothing" and "loaded and
+    # warned twice" must be distinguishable per PR in the scorecard.
+    note = f"graph: {warnings} co-change warning(s), {callers} caller edge(s) injected"
+    return graph_mod.render(graph, diff_files, symbol_ids), (note,)
 
 
 def _apply_feedback(
