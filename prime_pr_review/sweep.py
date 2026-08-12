@@ -15,7 +15,9 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import ci as ci_mod
 from . import context as context_mod
+from . import exports as exports_mod
 from . import github
 from . import graph as graph_mod
 from .analysis import AnalysisResult
@@ -295,11 +297,64 @@ def _build_payload(
         parts.append(analysis_part)
     notes.extend(analysis_notes)
 
+    ci_part, ci_note = _ci_section(config, pr, repo_slug, runner)
+    if ci_part:
+        parts.append(ci_part)
+    if ci_note:
+        notes.append(ci_note)
+
+    exports_part, exports_note = _exports_section(config, diff, enrichment)
+    if exports_part:
+        parts.append(exports_part)
+    if exports_note:
+        notes.append(exports_note)
+
     guidance = render_rejection_guidance(enrichment.rejections)
     if guidance:
         parts.append(guidance)
 
     return "\n\n".join(parts), tuple(notes)
+
+
+def _ci_section(
+    config: Config,
+    pr: PullRequest,
+    repo_slug: str,
+    runner: github.GhRunner,
+) -> tuple[str, str]:
+    """CI state as evidence (P12): never re-derive what the build already proved.
+
+    fetch_ci_status degrades to "unknown" on any gh failure, and render("") for
+    unknown, so a repo without CI costs nothing and says nothing.
+    """
+    if not config.review.check_ci:
+        return "", ""
+
+    status = ci_mod.fetch_ci_status(repo_slug, pr.number, runner)
+    excerpt = ""
+    if status.state == "failing":
+        excerpt = ci_mod.fetch_failure_excerpt(repo_slug, pr.number, runner)
+    return ci_mod.render(status, excerpt), ci_mod.activity_note(status)
+
+
+def _exports_section(
+    config: Config,
+    diff: str,
+    enrichment: Enrichment | None,
+) -> tuple[str, str]:
+    """Diff-added public symbols with zero production callers (P13).
+
+    Uses the LENIENT git runner on purpose: for `git grep`, exit 1 means "no
+    matches", which is exactly the zero-callers condition this exists to catch —
+    the strict ancestry runner would raise on it and silently disable the check.
+    """
+    if enrichment is None or not config.review.check_exports or not config.review.repo_root:
+        return "", ""
+
+    unwired = exports_mod.find_unwired_exports(
+        diff, context_mod.default_git_runner, enrichment.repo_root
+    )
+    return exports_mod.render(unwired), exports_mod.activity_note(unwired)
 
 
 def _graph_section(
@@ -445,13 +500,13 @@ def _attach_blast(
     verdict: Verdict,
     enrichment: Enrichment | None,
 ) -> tuple[Verdict, tuple[str, ...]]:
+    """Run blast-radius analysis and attach its entries to the verdict."""
     if (
         enrichment is not None
         and config.review.check_blast
         and _is_docs_only(diff, config.review.docs_globs)
     ):
         return verdict, ("blast radius skipped: docs-only diff",)
-    """Run blast-radius analysis and attach its entries to the verdict."""
     if enrichment is None or enrichment.model_fn is None or not config.review.check_blast:
         return verdict, ()
 

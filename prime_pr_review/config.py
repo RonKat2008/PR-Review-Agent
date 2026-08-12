@@ -110,6 +110,11 @@ class ReviewConfig:
     # blast passes entirely — a docs-only PR cannot break callers, and its
     # "intent" is its text. The base review still runs.
     docs_globs: tuple[str, ...] = ("**/*.md", "**/*.rst", "**/*.txt", "docs/**")
+    # CI awareness (P12): inject build status + failing-log tail as evidence.
+    check_ci: bool = True
+    # Unwired-export detection (P13): diff-added public symbols with zero
+    # production callers. Needs repo_root (grep runs in the checkout).
+    check_exports: bool = True
     # Ensemble (P2): number of independent review runs per PR. 1 = off (single
     # call, self-reported confidence — known to be uncalibrated). 3 = the
     # measured fix, at 3x review cost. min_confidence only becomes a real gate
@@ -198,6 +203,8 @@ def _build_config(raw: dict) -> Config:
             allow_request_changes=bool(review.get("allow_request_changes", False)),
             graph_path=str(review.get("graph_path", "")).strip(),
             intent_min_files=int(review.get("intent_min_files", 0)),
+            check_ci=bool(review.get("check_ci", True)),
+            check_exports=bool(review.get("check_exports", True)),
             ensemble_size=int(review.get("ensemble_size", 1)),
             min_agreement=int(review.get("min_agreement", 2)),
             docs_globs=tuple(

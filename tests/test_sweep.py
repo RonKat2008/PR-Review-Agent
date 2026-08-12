@@ -274,6 +274,63 @@ def test_ensemble_off_by_default_keeps_a_single_call(tmp_path):
     assert len(calls) == 1
 
 
+def test_failing_ci_reaches_the_prompt_and_the_notes(tmp_path):
+    """P12: the model is told what CI already proved, per PR."""
+    import json as _json
+
+    def is_pr_checks(args):
+        return args[0] == "pr" and args[1] == "checks"
+
+    checks = _json.dumps([
+        {"name": "contract-and-static", "state": "FAILURE", "bucket": "fail",
+         "link": "", "description": "ruff found errors"},
+    ])
+    gh = gh_with(make_pr(number=1)).on(is_pr_checks, checks)
+    seen: list[str] = []
+
+    def reviewer(pr, payload, lane):
+        seen.append(payload)
+        return VERDICT_WITH_BUG
+
+    report, _ = sweep_lane(
+        make_config(), LANE_OPEN, reviewer, State.empty(), gh, tmp_path, NOW,
+        enrichment=Enrichment(),
+    )
+
+    assert "contract-and-static" in seen[0], "failing check should be named in the prompt"
+    assert any(n.startswith("ci: failing") for n in report.outcomes[0].notes)
+
+
+def test_unwired_exports_reach_the_prompt_and_the_notes(tmp_path, monkeypatch):
+    """P13: zero-caller additions become evidence the model must weigh."""
+    from prime_pr_review import sweep as sweep_module
+    from prime_pr_review.exports import UnwiredExport
+
+    unwired = (UnwiredExport(symbol="write_capability_state", file="src/state.py",
+                             line=596, test_references=4, definition_kind="function"),)
+    monkeypatch.setattr(
+        sweep_module.exports_mod, "find_unwired_exports", lambda *a, **k: unwired
+    )
+
+    gh = gh_with(make_pr(number=1))
+    seen: list[str] = []
+
+    def reviewer(pr, payload, lane):
+        seen.append(payload)
+        return VERDICT_WITH_BUG
+
+    config = make_config()
+    config = replace(config, review=replace(config.review, repo_root=str(tmp_path)))
+
+    report, _ = sweep_lane(
+        config, LANE_OPEN, reviewer, State.empty(), gh, tmp_path, NOW,
+        enrichment=Enrichment(),
+    )
+
+    assert "write_capability_state" in seen[0]
+    assert any(n.startswith("exports:") for n in report.outcomes[0].notes)
+
+
 def test_docs_only_diff_skips_intent_and_blast_with_notes(tmp_path):
     """C4: prose cannot break callers; both model-costing passes are skipped."""
     docs_diff = "diff --git a/docs/guide.md b/docs/guide.md\n+hello\n"
