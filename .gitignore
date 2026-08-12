@@ -26,6 +26,14 @@ build/
 .prime/sessions/
 .prime/logs/
 
+# Generated knowledge graphs of reviewed repos (contain their file paths;
+# derived artifacts, rebuilt from git history + CodeGraph on demand)
+graphs/
+
+# Stray pytest capture files from subagent runs
+pytest_stdout.txt
+pytest_stderr.txt
+
 # OS
 Thumbs.db
 .DS_Store
