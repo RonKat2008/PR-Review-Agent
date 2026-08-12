@@ -374,6 +374,41 @@ If you do want per-author data, my recommendation is: keep it **local and privat
 normalize every metric by PR size and area difficulty, report ranges rather than ranks,
 and never surface it in a PR comment where it becomes a public judgment of a colleague.
 
+### P12 — CI awareness ★ benchmark gap
+
+The competing reviewer reads the Actions run, names the failing step, and quotes the
+exact error. Deterministic for us: `gh pr checks <n>` + `gh run view --log-failed`,
+parsed into a CIStatus section (state, failing step, first error lines) injected into
+the prompt AND rendered in the review header. A PR with red CI gets its verdict framed
+around that fact first.
+
+### P13 — Unwired-export detector ★ benchmark gap, deterministic
+
+Their best finding class: a NEW exported symbol with zero production call sites, while
+the PR body claims it is essential. Inverse of P9: for each symbol ADDED by the diff,
+grep/graph call sites outside the diff and outside tests. Zero callers -> evidence
+handed to the model: "PR adds public `X`; no production caller found; PR body says
+<quote>. Wire it, or defer explicitly?" Pairs with P8's intent statement for the
+promise-vs-wiring cross-check at symbol depth.
+
+### P14 — Verify-before-claim pass ★ the structural gap
+
+Their reviewer runs commands to confirm each claim before speaking. Bounded version
+for us, keeping cost sane: after the draft verdict, deterministically validate every
+finding's citations — file exists in diff, line exists, named symbols exist in the
+repo — and drop-with-note anything that fails (directly serves E1's zero-fabrication
+bar). Optionally one bounded verification round: model lists checkable predicates
+("symbol X has no callers"), harness executes them (grep only, no code execution),
+verdict revised once. Never open-ended agentic loops on a public reviewer.
+
+### P15 — Repo metadata + cross-reviewer corroboration
+
+`mergeable_state`/behind-main into the header (one gh field). Other bots' review
+comments ingested as UNTRUSTED corroboration data — fenced as data, never as
+instructions (prompt-injection surface: a malicious PR comment must not be able to
+steer our reviewer). Findings other reviewers also raised get a corroboration tag,
+same as linters do today.
+
 ### P7 — Per-file fan-out for large PRs
 
 Current behavior truncates at `max_diff_bytes` on file boundaries — a 50-file PR gets partially reviewed with no signal about what was dropped. Instead, above a threshold, spawn one subagent per file and merge. Uses the same `rlm()` recursion as P2.
