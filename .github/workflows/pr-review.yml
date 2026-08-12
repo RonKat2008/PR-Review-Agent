@@ -1,0 +1,163 @@
+name: PR Review
+
+# --- Deployment model ----------------------------------------------------------
+# This file lives in the reviewer's OWN repo (the "agent repo") and is the
+# deployable unit, not a live deployment by itself -- see docs/GITHUB-ACTIONS.md.
+# A GitHub Actions token is always scoped to exactly the one repository a
+# workflow runs in, so `secrets.GITHUB_TOKEN` here can only read/comment on PRs
+# in whichever repo currently hosts this file. Reviewing example-org/service-a or
+# example-org/service-b therefore requires the owner to manually copy this file
+# (and, separately, make the reviewer's Python source available there) into
+# that repo's own .github/workflows/ -- a documented, manual step this
+# repository never performs on its own. `--repo` below resolves to whichever
+# repository is actually running the workflow, so the same file works
+# unmodified after that copy.
+#
+# read_only = true is set on both example-org targets in config.toml (owner's
+# standing instruction). The sweep still runs there and still writes
+# reviews/*.md, but the comment sink refuses to post -- see sinks.py's
+# evaluate_comment_gates, checked before dry_run on purpose. Until the owner
+# flips read_only, a review of those repos is only ever visible as the
+# "Upload reviews as an artifact" artifact and the job summary below, never as
+# a PR comment. See docs/GITHUB-ACTIONS.md.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: >-
+          Repo to review, as owner/name, matching a config.toml [[repos]]
+          entry (e.g. example-org/service-a). Required -- see "test with
+          workflow_dispatch" in docs/GITHUB-ACTIONS.md.
+        required: true
+        type: string
+      pr:
+        description: "PR number to review, inside the repo above."
+        required: true
+        # workflow_dispatch has no numeric input type; run_sweep.py's argparse
+        # parses this string into an int the same way a CLI arg always would.
+        type: string
+
+# --- SECURITY: least privilege --------------------------------------------------
+# Exactly what posting a review and reading PR metadata/diff need, nothing else:
+# no `issues`, `actions`, `checks`, `id-token`, or `contents: write`. A bug in
+# this workflow, or in anything it calls, can only ever do what these two scopes
+# allow -- it cannot touch Actions settings, repo contents, or other APIs.
+permissions:
+  pull-requests: write # post the review, read existing comments for idempotency
+  contents: read # checkout this repo's own code
+
+# --- SECURITY: cancel stale runs on rapid pushes --------------------------------
+# A PR pushed 3 times in a minute would otherwise queue 3 full reviews of
+# diffs that are all already superseded. Grouping by PR number means a new
+# push cancels whatever review of that SAME PR is still in flight, while
+# leaving every other PR's run untouched. workflow_dispatch runs carry no
+# `github.event.pull_request`, so they fall back to the `pr` input.
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      # --- SECURITY: never execute code from the PR --------------------------
+      # No `ref:` override. Under `pull_request_target`, actions/checkout with
+      # no `ref` defaults to the BASE branch of whichever repo runs this
+      # workflow -- this repo's own reviewer code -- never the PR's head
+      # commit or branch. Setting `ref: github.event.pull_request.head.sha`
+      # (an easy mistake -- an earlier draft of this workflow did exactly
+      # that) would materialize fork-authored code onto a runner that also
+      # holds GEMINI_API_KEY and a pull-requests:write token: the single most
+      # exploited GitHub Actions misconfiguration. This workflow never
+      # installs, builds, or runs anything from the PR -- the diff is read
+      # exactly once, as text, via `gh pr diff` inside run_sweep.py.
+      - name: Checkout agent repo (base ref only -- never the PR head)
+        uses: actions/checkout@v4 # SECURITY: pinned to a major tag, official action only
+        with:
+          persist-credentials: false # SECURITY: token is never left on disk for a later step or process to reuse
+
+      - name: Set up Python
+        uses: actions/setup-python@v5 # SECURITY: pinned to a major tag, official action only
+        with:
+          python-version: "3.13"
+
+      # Installs THIS repo's own dependencies (pyproject.toml, checked out
+      # above from the base ref). Nothing from the PR is installed, built, or
+      # imported -- the PR is never checked out in the first place.
+      - name: Install the reviewer
+        run: python -m pip install -e .
+
+      # --- Knowledge graph (optional, best-effort) ----------------------------
+      # A missing graph is an explicitly supported state, not a failure:
+      # graph.py's load_for_review() already degrades a missing, unreadable,
+      # or stale graph to "no graph" with a visible note in the rendered
+      # review. This step must never fail the job just because build-graph.yml
+      # has not produced a `cochange-graph` artifact yet for this repo.
+      - name: Download latest knowledge graph artifact (best-effort)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          mkdir -p graphs
+
+          RUN_ID="$(gh run list --repo "${{ github.repository }}" \
+            --workflow build-graph.yml --branch main --status success --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
+
+          if [ -z "$RUN_ID" ]; then
+            echo "::notice title=No knowledge graph::No successful build-graph.yml run found yet on main; reviewing without a knowledge graph."
+            exit 0
+          fi
+
+          if gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+              --name cochange-graph --dir graphs; then
+            echo "Downloaded graph artifact from run $RUN_ID"
+          else
+            echo "::notice title=No knowledge graph::Run $RUN_ID has no 'cochange-graph' artifact; reviewing without a knowledge graph."
+          fi
+
+      # --repo/--pr select the trigger's source: the PR event for the
+      # automatic trigger, the two required inputs for a manual run. Resolved
+      # into env vars first (rather than interpolated straight into the shell
+      # command) so nothing that ever becomes attacker-influenced free text
+      # can be added here later without it being an obvious script-injection
+      # review comment -- github.repository and the PR number are not
+      # attacker-controlled today, but the pattern is worth keeping safe by
+      # construction.
+      - name: Run the sweep for this PR
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.repo || github.repository }}
+          TARGET_PR: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || github.event.pull_request.number }}
+        run: |
+          python scripts/run_sweep.py \
+            --config config.toml \
+            --repo "$TARGET_REPO" \
+            --pr "$TARGET_PR"
+
+      # Always runs, even if the sweep step above failed or exited non-zero
+      # (report.errors > 0): a partial run's local reviews/ output is still
+      # worth having for debugging, and this is the primary way a review on a
+      # read_only repo is ever seen (see the deployment-model note above).
+      - name: Upload reviews as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4 # SECURITY: pinned to a major tag, official action only
+        with:
+          name: pr-review-${{ github.event_name == 'workflow_dispatch' && inputs.pr || github.event.pull_request.number }}-${{ github.run_id }}
+          path: reviews/
+          if-no-files-found: warn
+          retention-days: 90 # primary deliverable on read_only repos -- see docs/GITHUB-ACTIONS.md
+
+      - name: Write review to the job summary
+        if: always()
+        run: |
+          latest="$(ls -t reviews/*.md 2>/dev/null | head -n 1 || true)"
+          if [ -n "$latest" ]; then
+            cat "$latest" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No review file was produced this run._" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,72 @@
+name: Build Knowledge Graph
+
+# --- Deployment model ----------------------------------------------------------
+# Mines whichever repo this workflow is currently checked out in (see
+# `--repo .` below) -- today, that is this agent repo itself. Producing a
+# meaningful co-change graph of example-org/service-a or example-org/service-b
+# requires the owner to copy this file, together with the single,
+# dependency-free scripts/build_cochange.py (see the step below), into that
+# repo's own .github/workflows/ and scripts/ -- a manual step, documented in
+# docs/GITHUB-ACTIONS.md, never performed automatically by anything here.
+# pr-review.yml's graph-download step looks for this workflow's artifact in
+# the SAME repository it runs in, so once both files are installed together
+# in a target repo, they line up without any further changes.
+#
+# Co-change edges only (Tier 0 of docs/KNOWLEDGE-GRAPH.md's four-tier graph).
+# Static-structure indexing via CodeGraph/SCIP (B3/B4 in docs/FINAL-PLAN.md)
+# is a deliberate future addition -- not installed in this workflow yet.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Keeps the graph from going stale between pushes to main.
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+
+# --- SECURITY: least privilege --------------------------------------------------
+# Read-only checkout, nothing is posted or written back to the repo -- the
+# graph leaves this job only as a build artifact.
+permissions:
+  contents: read
+
+jobs:
+  build-graph:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: build_cochange.py walks `git log --name-only` over many
+      # commits (--since-commits, default 500) to find files that change
+      # together. actions/checkout's default is a shallow (depth-1) clone,
+      # which would starve the miner of history and silently under-count real
+      # co-change pairs -- fetch-depth 0 fetches the whole history instead.
+      - name: Checkout with full history
+        uses: actions/checkout@v4 # SECURITY: pinned to a major tag, official action only
+        with:
+          fetch-depth: 0
+          persist-credentials: false # SECURITY: token is never left on disk for a later step or process to reuse
+
+      - name: Set up Python
+        uses: actions/setup-python@v5 # SECURITY: pinned to a major tag, official action only
+        with:
+          python-version: "3.13"
+
+      # No `pip install -e .` here on purpose: build_cochange.py's own module
+      # docstring notes it imports only the standard library, specifically so
+      # it can be copied into a target repo on its own (see the deployment
+      # note above) without installing the reviewer package at all.
+      - name: Mine co-change graph
+        run: |
+          python scripts/build_cochange.py \
+            --repo . \
+            --out cochange-graph.json \
+            --ref HEAD
+
+      # Named stably ("cochange-graph") rather than per-run, so
+      # pr-review.yml's download step can always ask for "the latest
+      # cochange-graph artifact" without knowing this run's id in advance.
+      - name: Upload graph artifact
+        uses: actions/upload-artifact@v4 # SECURITY: pinned to a major tag, official action only
+        with:
+          name: cochange-graph
+          path: cochange-graph.json
+          retention-days: 30

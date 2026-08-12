@@ -132,6 +132,20 @@ def main() -> int:
             "block applies instead)."
         ),
     )
+    parser.add_argument(
+        "--repo-root",
+        default="",
+        help=(
+            "Override review.repo_root for this run. Config values are local "
+            "machine paths; under Actions the workspace IS the target checkout, "
+            "so CI passes this explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--graph-path",
+        default="",
+        help="Override review.graph_path for this run (e.g. a CI-downloaded artifact).",
+    )
     lane_source = parser.add_mutually_exclusive_group()
     lane_source.add_argument(
         "--fresh",
@@ -157,6 +171,16 @@ def main() -> int:
     except ConfigError as exc:
         print(f"Config error: {exc}", file=sys.stderr)
         return 1
+
+    if args.repo_root or args.graph_path:
+        from dataclasses import replace as _replace
+
+        review = config.review
+        if args.repo_root:
+            review = _replace(review, repo_root=args.repo_root)
+        if args.graph_path:
+            review = _replace(review, graph_path=args.graph_path)
+        config = _replace(config, review=review)
 
     print(f"Resolved repo: {repo.slug} (read_only={repo.read_only})")
 
