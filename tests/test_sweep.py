@@ -213,6 +213,35 @@ def test_static_analysis_findings_are_injected_when_repo_root_is_set(tmp_path):
     assert "B608" in seen[0], "linter evidence should reach the model"
 
 
+def test_docs_only_diff_skips_intent_and_blast_with_notes(tmp_path):
+    """C4: prose cannot break callers; both model-costing passes are skipped."""
+    docs_diff = "diff --git a/docs/guide.md b/docs/guide.md\n+hello\n"
+    gh = gh_with(make_pr(number=1), diff=docs_diff)
+
+    report, _ = sweep_lane(
+        make_config(ignore_paths=()), LANE_OPEN, reviewer_returning(VERDICT_WITH_BUG),
+        State.empty(), gh, tmp_path, NOW,
+        enrichment=Enrichment(model_fn=lambda prompt: "{}"),
+    )
+
+    notes = report.outcomes[0].notes
+    assert any("intent check skipped: docs-only" in n for n in notes)
+
+
+def test_intent_min_files_threshold_skips_small_diffs(tmp_path):
+    gh = gh_with(make_pr(number=1))  # SAMPLE_DIFF touches 1 kept file
+    config = make_config()
+    config = replace(config, review=replace(config.review, intent_min_files=3))
+
+    report, _ = sweep_lane(
+        config, LANE_OPEN, reviewer_returning(VERDICT_WITH_BUG),
+        State.empty(), gh, tmp_path, NOW,
+        enrichment=Enrichment(model_fn=lambda prompt: "{}"),
+    )
+
+    assert any("below intent_min_files" in n for n in report.outcomes[0].notes)
+
+
 def test_rejected_findings_are_suppressed_with_an_audit_note(tmp_path):
     """A finding maintainers rejected (P6) is filtered out, and the outcome says so."""
     from prime_pr_review.feedback import Rejection, claim_fingerprint

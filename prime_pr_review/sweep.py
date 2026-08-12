@@ -370,6 +370,29 @@ def _analysis_section(
     return result.render(), ()
 
 
+def _is_docs_only(diff: str, globs: Sequence[str]) -> bool:
+    """True when every file in the diff matches a docs glob.
+
+    Docs-only diffs skip the intent and blast passes (C4): prose cannot break
+    callers, and each skipped pass is a model call saved at scale.
+    """
+    import fnmatch
+
+    paths = [f.path for f in split_by_file(diff)]
+    if not paths:
+        return False
+
+    def matches(path: str) -> bool:
+        for pattern in globs:
+            if fnmatch.fnmatch(path, pattern):
+                return True
+            if pattern.startswith("**/") and fnmatch.fnmatch(path, pattern[3:]):
+                return True
+        return False
+
+    return all(matches(p) for p in paths)
+
+
 def _attach_scope(
     config: Config,
     pr: PullRequest,
@@ -380,6 +403,14 @@ def _attach_scope(
     """Run the two-pass intent check and attach its Scope to the verdict."""
     if enrichment is None or enrichment.model_fn is None or not config.review.check_intent:
         return verdict, ()
+
+    changed = len(split_by_file(diff))
+    if config.review.intent_min_files and changed < config.review.intent_min_files:
+        return verdict, (
+            f"intent check skipped: {changed} file(s) below intent_min_files",
+        )
+    if _is_docs_only(diff, config.review.docs_globs):
+        return verdict, ("intent check skipped: docs-only diff",)
 
     try:
         scope = run_intent_check(pr, diff, enrichment.model_fn, enrichment.prompts_dir)
@@ -398,6 +429,12 @@ def _attach_blast(
     verdict: Verdict,
     enrichment: Enrichment | None,
 ) -> tuple[Verdict, tuple[str, ...]]:
+    if (
+        enrichment is not None
+        and config.review.check_blast
+        and _is_docs_only(diff, config.review.docs_globs)
+    ):
+        return verdict, ("blast radius skipped: docs-only diff",)
     """Run blast-radius analysis and attach its entries to the verdict."""
     if enrichment is None or enrichment.model_fn is None or not config.review.check_blast:
         return verdict, ()

@@ -102,6 +102,14 @@ class ReviewConfig:
     # blocking a colleague's merge is a strong action and should be chosen, not
     # inherited from a default.
     allow_request_changes: bool = False
+    # Selective enrichment (C4): every skipped pass is a model call saved.
+    # Intent checking runs only when the diff touches at least this many files
+    # (0 = always). Single-file diffs rarely hide scope creep.
+    intent_min_files: int = 0
+    # Diffs where EVERY file matches one of these globs skip the intent and
+    # blast passes entirely — a docs-only PR cannot break callers, and its
+    # "intent" is its text. The base review still runs.
+    docs_globs: tuple[str, ...] = ("**/*.md", "**/*.rst", "**/*.txt", "docs/**")
 
 
 @dataclass(frozen=True)
@@ -182,6 +190,10 @@ def _build_config(raw: dict) -> Config:
             check_blast=bool(review.get("check_blast", True)),
             allow_request_changes=bool(review.get("allow_request_changes", False)),
             graph_path=str(review.get("graph_path", "")).strip(),
+            intent_min_files=int(review.get("intent_min_files", 0)),
+            docs_globs=tuple(
+                review.get("docs_globs", ("**/*.md", "**/*.rst", "**/*.txt", "docs/**"))
+            ),
         ),
         sinks=SinkConfig(
             pr_comment=bool(sinks.get("pr_comment", True)),
