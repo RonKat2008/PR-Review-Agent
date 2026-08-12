@@ -22,6 +22,7 @@ from .analysis import AnalysisResult
 from .blast import analyze_blast_radius, extract_changed_symbols
 from .context import GitRunner
 from .diffs import split_by_file
+from .ensemble import ensemble_review
 from .feedback import Rejection, filter_rejected, render_rejection_guidance
 from .reviews_api import commentable_lines
 from .config import Config, Secrets
@@ -196,7 +197,14 @@ def _review_one(
     payload, notes = _build_payload(config, pr, filtered.text, repo_slug, runner, enrichment)
 
     try:
-        verdict = parse_verdict(reviewer(pr, payload, lane))
+        if config.review.ensemble_size > 1:
+            verdict = ensemble_review(
+                pr, payload, lane, reviewer,
+                size=config.review.ensemble_size,
+                min_agreement=config.review.min_agreement,
+            )
+        else:
+            verdict = parse_verdict(reviewer(pr, payload, lane))
     except VerdictError as exc:
         return PullRequestOutcome(pr=pr, lane=lane, error=f"unusable verdict: {exc}"), budget
     except Exception as exc:  # noqa: BLE001 - a subagent may fail in any manner

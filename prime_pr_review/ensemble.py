@@ -20,9 +20,15 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
+from collections.abc import Callable
+
 from .github import PullRequest
 from .review import Finding, FixClaim, Severity, Verdict, VerdictError, parse_verdict
-from .sweep import Reviewer
+
+# Structurally identical to sweep.Reviewer, declared locally instead of imported:
+# sweep imports this module to wire the ensemble in, so importing sweep back
+# from here would be a circular import.
+Reviewer = Callable[[PullRequest, str, str], str]
 
 # Independent reviewer runs almost never agree on the exact line of the same
 # defect -- one counts from the hunk header, another from the decorator, a third

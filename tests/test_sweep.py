@@ -213,6 +213,43 @@ def test_static_analysis_findings_are_injected_when_repo_root_is_set(tmp_path):
     assert "B608" in seen[0], "linter evidence should reach the model"
 
 
+def test_ensemble_size_three_runs_the_reviewer_three_times_and_votes(tmp_path):
+    gh = gh_with(make_pr(number=1))
+    calls: list[str] = []
+
+    def reviewer(pr, payload, lane):
+        calls.append(lane)
+        return VERDICT_WITH_BUG
+
+    config = make_config()
+    config = replace(config, review=replace(config.review, ensemble_size=3))
+
+    report, _ = sweep_lane(
+        config, LANE_OPEN, reviewer, State.empty(), gh, tmp_path, NOW,
+    )
+
+    assert len(calls) == 3
+    verdict = report.outcomes[0].verdict
+    assert verdict is not None
+    assert verdict.confidence == 1.0, "3/3 agreement is an observed 100%"
+    assert "3/3 reviewers" in verdict.introduces[0].corroboration
+
+
+def test_ensemble_off_by_default_keeps_a_single_call(tmp_path):
+    gh = gh_with(make_pr(number=1))
+    calls: list[str] = []
+
+    def reviewer(pr, payload, lane):
+        calls.append(lane)
+        return VERDICT_WITH_BUG
+
+    sweep_lane(
+        make_config(), LANE_OPEN, reviewer, State.empty(), gh, tmp_path, NOW,
+    )
+
+    assert len(calls) == 1
+
+
 def test_docs_only_diff_skips_intent_and_blast_with_notes(tmp_path):
     """C4: prose cannot break callers; both model-costing passes are skipped."""
     docs_diff = "diff --git a/docs/guide.md b/docs/guide.md\n+hello\n"

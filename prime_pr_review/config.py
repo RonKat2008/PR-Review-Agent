@@ -110,6 +110,13 @@ class ReviewConfig:
     # blast passes entirely — a docs-only PR cannot break callers, and its
     # "intent" is its text. The base review still runs.
     docs_globs: tuple[str, ...] = ("**/*.md", "**/*.rst", "**/*.txt", "docs/**")
+    # Ensemble (P2): number of independent review runs per PR. 1 = off (single
+    # call, self-reported confidence — known to be uncalibrated). 3 = the
+    # measured fix, at 3x review cost. min_confidence only becomes a real gate
+    # when this is > 1, because only then is confidence an observed quantity.
+    ensemble_size: int = 1
+    # Findings must appear in at least this many runs to survive (absolute count).
+    min_agreement: int = 2
 
 
 @dataclass(frozen=True)
@@ -191,6 +198,8 @@ def _build_config(raw: dict) -> Config:
             allow_request_changes=bool(review.get("allow_request_changes", False)),
             graph_path=str(review.get("graph_path", "")).strip(),
             intent_min_files=int(review.get("intent_min_files", 0)),
+            ensemble_size=int(review.get("ensemble_size", 1)),
+            min_agreement=int(review.get("min_agreement", 2)),
             docs_globs=tuple(
                 review.get("docs_globs", ("**/*.md", "**/*.rst", "**/*.txt", "docs/**"))
             ),
@@ -237,6 +246,15 @@ def _validate(config: Config) -> None:
         )
     if review.max_diff_bytes <= 0:
         problems.append(f"review.max_diff_bytes must be > 0, got {review.max_diff_bytes}")
+    if review.ensemble_size < 1:
+        problems.append(f"review.ensemble_size must be >= 1, got {review.ensemble_size}")
+    # min_agreement is only meaningful when the ensemble is on; with size 1 the
+    # single run is authoritative and the knob is ignored.
+    elif review.ensemble_size > 1 and not (1 <= review.min_agreement <= review.ensemble_size):
+        problems.append(
+            "review.min_agreement must be between 1 and ensemble_size, "
+            f"got {review.min_agreement} with ensemble_size {review.ensemble_size}"
+        )
     if config.sinks.webhook_kind not in WEBHOOK_KINDS:
         problems.append(
             f"sinks.webhook.kind must be one of {WEBHOOK_KINDS}, "
