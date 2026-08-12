@@ -860,3 +860,22 @@ def test_main_never_posts_even_through_the_full_cli_with_a_live_config(tmp_path)
     assert exit_code == 0
     assert gh.calls_matching("pr comment") == []
     assert gh.calls_matching("/reviews") == []
+
+
+def test_open_state_lists_open_prs_and_suffixes_the_report_name():
+    """--state open previews live candidates without touching merged history."""
+    from datetime import datetime, timezone
+
+    from scripts.replay_corpus import _report_filename, _select_prs
+    from tests.conftest import FakeGh, is_pr_list, make_pr, pr_list_json
+
+    gh = FakeGh().on(is_pr_list, pr_list_json(make_pr(number=8), make_pr(number=7)))
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+
+    picked = _select_prs("acme/widget", gh, 1, now, pr_state="open")
+
+    assert [p.number for p in picked] == [8], "newest first, trimmed to count"
+    listing_args = " ".join(gh.calls[0][0])
+    assert "--state open" in listing_args
+    assert _report_filename("acme/widget", now, "open") == "replay-acme-widget-open-20260812.md"
+    assert _report_filename("acme/widget", now) == "replay-acme-widget-20260812.md"

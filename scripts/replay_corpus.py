@@ -208,6 +208,8 @@ class ReplayRun:
     now: datetime
     config: Config  # the LOCKED-DOWN config every PR in this run actually used
     results: tuple[ReplayResult, ...]
+    # "merged" replays history (the E1 gate); "open" previews live candidates.
+    pr_state: str = "merged"
 
     @property
     def errors(self) -> tuple[ReplayResult, ...]:
@@ -215,16 +217,22 @@ class ReplayRun:
 
 
 def _select_prs(
-    repo_slug: str, runner: github.GhRunner, count: int, now: datetime
+    repo_slug: str,
+    runner: github.GhRunner,
+    count: int,
+    now: datetime,
+    pr_state: str = "merged",
 ) -> tuple[PullRequest, ...]:
-    """The last `count` merged PRs on `repo_slug`, newest first.
+    """The last `count` PRs on `repo_slug` in the requested state, newest first.
 
-    `since` is deliberately generous (`SINCE_DAYS`) rather than derived from
-    `count`: the goal is to reach far enough back that a slow-moving repo still
-    yields `count` results, then trim client-side. `list_merged_prs` already
-    returns newest first; trimming here never reorders it, so a short result
-    is always the newest `len(result)` PRs, never an arbitrary subset.
+    merged: `since` is deliberately generous (`SINCE_DAYS`) rather than derived
+    from `count` — reach far enough back that a slow-moving repo still yields
+    `count` results, then trim client-side. Both listings return newest first;
+    trimming never reorders, so a short result is always the newest
+    `len(result)` PRs, never an arbitrary subset.
     """
+    if pr_state == "open":
+        return github.list_open_prs(repo_slug, runner)[:count]
     since = now - timedelta(days=SINCE_DAYS)
     merged = github.list_merged_prs(repo_slug, since, runner)
     return merged[:count]
@@ -283,6 +291,7 @@ def run_replay(
     runner: github.GhRunner = github.default_runner,
     reviews_dir: Path | str = REVIEWS_DIR,
     now: datetime | None = None,
+    pr_state: str = "merged",
 ) -> ReplayRun:
     """The testable core: list the corpus, replay every PR in it, return the run.
 
@@ -292,7 +301,7 @@ def run_replay(
     """
     locked = _lock_down(config)
     moment = now or datetime.now(timezone.utc)
-    candidates = _select_prs(repo_slug, runner, count, moment)
+    candidates = _select_prs(repo_slug, runner, count, moment, pr_state)
     results = tuple(
         _replay_one(locked, pr, reviewer, enrichment, runner, reviews_dir)
         for pr in candidates
@@ -304,6 +313,7 @@ def run_replay(
         now=moment,
         config=locked,
         results=results,
+        pr_state=pr_state,
     )
 
 
@@ -323,9 +333,11 @@ re-run E1. Never go live on a missed bar.
 """
 
 
-def _report_filename(repo_slug: str, now: datetime) -> str:
+def _report_filename(repo_slug: str, now: datetime, pr_state: str = "merged") -> str:
     owner, name = repo_slug.split("/", 1)
-    return f"replay-{owner}-{name}-{now:%Y%m%d}.md"
+    # "open" gets a suffix so a same-day merged replay is never overwritten.
+    suffix = "-open" if pr_state == "open" else ""
+    return f"replay-{owner}-{name}{suffix}-{now:%Y%m%d}.md"
 
 
 def _graph_status(run: ReplayRun) -> str:
@@ -447,6 +459,7 @@ def render_report(run: ReplayRun) -> str:
         f"- **repo**: `{run.repo_slug}`",
         f"- **model**: `{run.model}`",
         f"- **mode**: DRY RUN (forced -- this harness never posts)",
+        f"- **PR state**: {run.pr_state}",
         f"- **count requested**: {run.count_requested}",
         f"- **count reviewed**: {reviewed}",
         f"- **timestamp**: {run.now.isoformat()}",
@@ -473,7 +486,7 @@ def write_report(run: ReplayRun, out_dir: Path | str) -> Path:
     """Render and write the single consolidated report. Returns its path."""
     directory = Path(out_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / _report_filename(run.repo_slug, run.now)
+    path = directory / _report_filename(run.repo_slug, run.now, run.pr_state)
     path.write_text(render_report(run), encoding="utf-8")
     return path
 
@@ -521,6 +534,10 @@ def main(
     )
     parser.add_argument("--model", default=DEFAULT_GEMINI_MODEL)
     parser.add_argument(
+        "--state", choices=("merged", "open"), default="merged",
+        help="Replay merged history (the E1 gate) or preview currently open PRs.",
+    )
+    parser.add_argument(
         "--out", default=str(DEFAULT_REPORTS_DIR),
         help="Directory the consolidated report is written into.",
     )
@@ -556,9 +573,10 @@ def main(
             enrichment,
             runner=runner,
             reviews_dir=reviews_dir,
+            pr_state=args.state,
         )
     except github.GitHubError as exc:
-        print(f"Could not list merged PRs for {repo.slug}: {exc}", file=sys.stderr)
+        print(f"Could not list {args.state} PRs for {repo.slug}: {exc}", file=sys.stderr)
         return 1
 
     out_path = write_report(run, args.out)
