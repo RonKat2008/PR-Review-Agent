@@ -10,14 +10,19 @@ in the digest rather than swallowed.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import context as context_mod
 from . import github
-from .blast import analyze_blast_radius
+from . import graph as graph_mod
+from .analysis import AnalysisResult
+from .blast import analyze_blast_radius, extract_changed_symbols
+from .context import GitRunner
+from .diffs import split_by_file
+from .reviews_api import commentable_lines
 from .config import Config, Secrets
 from .diffs import filter_diff
 from .github import PullRequest
@@ -43,6 +48,10 @@ Reviewer = Callable[[PullRequest, str, str], str]
 # itself, such as the intent check.
 ModelFn = Callable[[str], str]
 
+# (paths, diff_lines) -> AnalysisResult. The static-analysis pre-pass (P3);
+# injected so tests never shell out to ruff/bandit/mypy.
+AnalysisFn = Callable[[Sequence[str], frozenset[tuple[str, int]]], AnalysisResult]
+
 DEFAULT_PROMPTS_DIR = Path("skills/pr-review/prompts")
 
 
@@ -59,6 +68,11 @@ class Enrichment:
     model_fn: ModelFn | None = None
     repo_root: Path = Path(".")
     prompts_dir: Path = DEFAULT_PROMPTS_DIR
+    # Strict git runner for the graph freshness check (graph.strict_runner).
+    # Deliberately NOT the lenient grep runner: exit 1 must mean "refuse".
+    git_runner: GitRunner | None = None
+    # Static-analysis pre-pass; None disables it.
+    analysis_fn: AnalysisFn | None = None
 
 
 @dataclass(frozen=True)
@@ -221,30 +235,103 @@ def _build_payload(
     is missing, an API that rate-limits — none of those should cost us the review
     entirely. We degrade to the bare diff and say so.
     """
-    if enrichment is None or not config.review.gather_context:
+    if enrichment is None:
         return diff, ()
 
-    # Call-site discovery shells out to `git grep`, which runs in the process's
-    # working directory. Without a configured checkout of the reviewed repo we
-    # would be grepping whatever repo the sweep happens to run from and reporting
-    # its matches as call sites of the PR's symbols. Confidently wrong beats
-    # nothing only in the wrong direction, so skip instead.
-    if not config.review.repo_root:
-        return diff, ("context skipped: review.repo_root is not set",)
+    parts: list[str] = [diff]
+    notes: list[str] = []
+    has_root = bool(config.review.repo_root)
 
+    if config.review.gather_context:
+        if not has_root:
+            # Call-site discovery shells out to `git grep`, which runs in the
+            # process's working directory. Without a configured checkout of the
+            # reviewed repo we would grep whatever repo the sweep runs from and
+            # report its matches as call sites of the PR's symbols. Confidently
+            # wrong beats nothing only in the wrong direction, so skip instead.
+            notes.append("context skipped: review.repo_root is not set")
+        else:
+            try:
+                gathered = context_mod.gather_context(
+                    repo_slug=repo_slug,
+                    head_sha=pr.head_sha,
+                    diff=diff,
+                    repo_root=enrichment.repo_root,
+                    gh_runner=runner,
+                    max_bytes=config.review.max_context_bytes,
+                )
+                parts.append(gathered.render())
+                notes.extend(gathered.dropped)
+            except Exception as exc:  # noqa: BLE001 - degrade, never fail the review
+                notes.append(f"context unavailable: {exc}")
+
+    graph_part, graph_notes = _graph_section(config, pr, diff, enrichment)
+    if graph_part:
+        parts.append(graph_part)
+    notes.extend(graph_notes)
+
+    analysis_part, analysis_notes = _analysis_section(config, diff, enrichment)
+    if analysis_part:
+        parts.append(analysis_part)
+    notes.extend(analysis_notes)
+
+    return "\n\n".join(parts), tuple(notes)
+
+
+def _graph_section(
+    config: Config,
+    pr: PullRequest,
+    diff: str,
+    enrichment: Enrichment,
+) -> tuple[str, tuple[str, ...]]:
+    """Knowledge-graph evidence for the prompt: co-change warnings and callers.
+
+    The freshness check compares the graph's commit against the FETCHED base
+    (`origin/<base_ref>`), not the local branch — local base branches on dev
+    machines routinely lag by dozens of commits, which would wrongly refuse a
+    perfectly current graph.
+    """
+    if not config.review.graph_path:
+        return "", ()
+    if enrichment.git_runner is None:
+        return "", ("graph skipped: no git runner configured for the ancestry check",)
+
+    graph, reason = graph_mod.load_for_review(
+        config.review.graph_path,
+        f"origin/{pr.base_ref}",
+        enrichment.git_runner,
+        enrichment.repo_root,
+    )
+    if graph is None:
+        return "", (reason,)
+
+    diff_files = tuple(f.path for f in split_by_file(diff))
+    symbol_ids = tuple(f"{s.file}::{s.name}" for s in extract_changed_symbols(diff))
+    return graph_mod.render(graph, diff_files, symbol_ids), ()
+
+
+def _analysis_section(
+    config: Config,
+    diff: str,
+    enrichment: Enrichment,
+) -> tuple[str, tuple[str, ...]]:
+    """Static-analysis pre-pass (P3): deterministic findings as grounding evidence.
+
+    Runs only with a repo checkout present — the analyzers read files on disk,
+    and the default runner assumes the process cwd is the reviewed repo.
+    """
+    if enrichment.analysis_fn is None or not config.review.repo_root:
+        return "", ()
+
+    diff_files = tuple(f.path for f in split_by_file(diff))
     try:
-        gathered = context_mod.gather_context(
-            repo_slug=repo_slug,
-            head_sha=pr.head_sha,
-            diff=diff,
-            repo_root=enrichment.repo_root,
-            gh_runner=runner,
-            max_bytes=config.review.max_context_bytes,
-        )
+        result = enrichment.analysis_fn(diff_files, commentable_lines(diff))
     except Exception as exc:  # noqa: BLE001 - degrade, never fail the review
-        return diff, (f"context unavailable: {exc}",)
+        return "", (f"static analysis failed: {exc}",)
 
-    return f"{diff}\n\n{gathered.render()}", gathered.dropped
+    if result.is_empty and not result.errors:
+        return "", ()
+    return result.render(), ()
 
 
 def _attach_scope(

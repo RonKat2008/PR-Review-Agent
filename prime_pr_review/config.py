@@ -77,6 +77,10 @@ class ReviewConfig:
     # Run blast-radius analysis: what else does this change break? Needs repo_root,
     # since call-site discovery shells out to `git grep`.
     check_blast: bool = True
+    # Knowledge-graph file for the reviewed repo (docs/KNOWLEDGE-GRAPH.md schema).
+    # Empty means no graph: the review degrades to grep-based context with a note.
+    # A stale graph (commit not an ancestor of the PR base) is refused, not used.
+    graph_path: str = ""
     # Allow a CRITICAL finding or a broken caller to submit REQUEST_CHANGES, which
     # blocks the merge under branch protection. Off by default: automatically
     # blocking a colleague's merge is a strong action and should be chosen, not
@@ -155,6 +159,7 @@ def _build_config(raw: dict) -> Config:
             check_intent=bool(review.get("check_intent", True)),
             check_blast=bool(review.get("check_blast", True)),
             allow_request_changes=bool(review.get("allow_request_changes", False)),
+            graph_path=str(review.get("graph_path", "")).strip(),
         ),
         sinks=SinkConfig(
             pr_comment=bool(sinks.get("pr_comment", True)),

@@ -71,6 +71,14 @@ repo_root = ""
 gather_context = true
 max_context_bytes = 400000
 
+# --- Knowledge graph (P10) --------------------------------------------------
+# Graph file for the reviewed repo (schema: docs/KNOWLEDGE-GRAPH.md). Mined ones
+# live in graphs/ (gitignored):
+#   graphs/service-a-cochange.json     - example-org/service-a    @ origin/main
+#   graphs/service-b-cochange.json  - example-org/service-b @ origin/main
+# Empty = no graph; a stale graph is refused with a note, never trusted.
+graph_path = ""
+
 # --- Intent alignment (P8) --------------------------------------------------
 # Two-pass check: does the diff do what the PR says it does? Pass 1 derives the
 # intent from title/body/commits with the diff withheld; pass 2 judges the diff

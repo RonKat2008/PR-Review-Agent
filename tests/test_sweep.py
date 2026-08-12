@@ -12,7 +12,9 @@ from prime_pr_review.state import (
     is_reviewed,
     mark_reviewed,
 )
-from prime_pr_review.sweep import sweep_lane
+from dataclasses import replace
+
+from prime_pr_review.sweep import Enrichment, sweep_lane
 
 from .conftest import (
     FakeGh,
@@ -119,6 +121,96 @@ def test_skips_bot_authored_prs_before_spending_tokens(tmp_path):
 
     assert report.skipped == 1
     assert calls == [], "reviewer must never run on a skipped PR"
+
+
+def _graph_file(tmp_path, commit="graphsha"):
+    import json
+
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "repo": "acme/widget",
+        "commit": commit,
+        "built_at": "2026-08-12T00:00:00+00:00",
+        "nodes": [{"id": "src/app.py", "kind": "file"},
+                  {"id": "grammar.toml", "kind": "file"}],
+        "edges": [{"src": "src/app.py", "dst": "grammar.toml",
+                   "kind": "co_changes_with", "weight": 0.9, "samples": 20}],
+    }), encoding="utf-8")
+    return path
+
+
+def test_fresh_graph_evidence_is_injected_into_the_review_payload(tmp_path):
+    """A usable graph adds its rendered section; SAMPLE_DIFF touches src/app.py,
+    whose strong co-change partner grammar.toml is absent from the diff."""
+    gh = gh_with(make_pr(number=1))
+    seen: list[str] = []
+
+    def reviewer(pr, payload, lane):
+        seen.append(payload)
+        return VERDICT_WITH_BUG
+
+    enrichment = Enrichment(git_runner=lambda args: "")  # ancestry check passes
+
+    sweep_lane(
+        make_config(graph_path=str(_graph_file(tmp_path))), LANE_OPEN, reviewer,
+        State.empty(), gh, tmp_path, NOW, enrichment=enrichment,
+    )
+
+    assert "## Knowledge graph" in seen[0]
+    assert "grammar.toml" in seen[0], "the co-change warning should name the partner"
+
+
+def test_stale_graph_is_refused_with_a_visible_note(tmp_path):
+    """When ancestry fails the graph is NOT used and the outcome says why."""
+    from prime_pr_review.context import GitError
+
+    gh = gh_with(make_pr(number=1))
+    seen: list[str] = []
+
+    def reviewer(pr, payload, lane):
+        seen.append(payload)
+        return VERDICT_WITH_BUG
+
+    def refusing_runner(args):
+        raise GitError("exit 1: not an ancestor")
+
+    enrichment = Enrichment(git_runner=refusing_runner)
+
+    report, _ = sweep_lane(
+        make_config(graph_path=str(_graph_file(tmp_path))), LANE_OPEN, reviewer,
+        State.empty(), gh, tmp_path, NOW, enrichment=enrichment,
+    )
+
+    assert "## Knowledge graph" not in seen[0]
+    assert any("graph" in n for n in report.outcomes[0].notes)
+
+
+def test_static_analysis_findings_are_injected_when_repo_root_is_set(tmp_path):
+    from prime_pr_review.analysis import AnalysisResult, LintFinding
+    from prime_pr_review.review import Severity
+
+    gh = gh_with(make_pr(number=1))
+    seen: list[str] = []
+
+    def reviewer(pr, payload, lane):
+        seen.append(payload)
+        return VERDICT_WITH_BUG
+
+    def fake_analysis(paths, diff_lines):
+        return AnalysisResult(findings=(
+            LintFinding(tool="bandit", rule_id="B608", file="src/app.py",
+                        line=2, severity=Severity.CRITICAL, message="sql injection"),
+        ))
+
+    config = make_config()
+    config = replace(config, review=replace(config.review, repo_root=str(tmp_path)))
+    enrichment = Enrichment(analysis_fn=fake_analysis)
+
+    sweep_lane(config, LANE_OPEN, reviewer, State.empty(), gh, tmp_path, NOW,
+               enrichment=enrichment)
+
+    assert "B608" in seen[0], "linter evidence should reach the model"
 
 
 def test_findings_are_delivered_as_line_anchored_review_comments(tmp_path):

@@ -66,6 +66,7 @@ def make_config(
     bot_login: str = "prime-bot",
     ignore_paths: tuple[str, ...] = ("**/*.lock",),
     max_diff_bytes: int = 200_000,
+    graph_path: str = "",
     pr_comment: bool = True,
     webhook: bool = True,
     local_file: bool = True,
@@ -85,6 +86,7 @@ def make_config(
             ignore_paths=ignore_paths,
             max_diff_bytes=max_diff_bytes,
             allow_request_changes=allow_request_changes,
+            graph_path=graph_path,
         ),
         sinks=SinkConfig(
             pr_comment=pr_comment,

@@ -16,7 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from prime_pr_review.analysis import run_analysis  # noqa: E402
 from prime_pr_review.config import ConfigError, load_config, require_repo  # noqa: E402
+from prime_pr_review.graph import strict_runner  # noqa: E402
 from prime_pr_review.reviewers import gemini_model_fn, gemini_reviewer  # noqa: E402
 from prime_pr_review.state import (  # noqa: E402
     LANE_MERGED,
@@ -92,10 +94,15 @@ def main() -> int:
 
     api_key = resolve_api_key()
     reviewer = gemini_reviewer(api_key, model=args.model, prompts_dir=PROMPTS_DIR)
+    root_path = Path(config.review.repo_root or ".")
     enrichment = Enrichment(
         model_fn=gemini_model_fn(api_key, model=args.model),
-        repo_root=Path(config.review.repo_root or "."),
+        repo_root=root_path,
         prompts_dir=PROMPTS_DIR,
+        # Strict on purpose: for `merge-base --is-ancestor`, exit 1 means "stale
+        # graph, refuse" — the lenient grep runner would swallow it.
+        git_runner=strict_runner(root_path) if config.review.repo_root else None,
+        analysis_fn=run_analysis,
     )
 
     report, state = sweep_lane(

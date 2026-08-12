@@ -28,11 +28,37 @@ every time.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from .context import GitError, GitRunner
+
+
+def strict_runner(repo_root: Path | str) -> GitRunner:
+    """A git runner for the ancestry check that raises on ANY nonzero exit.
+
+    Do not reuse `context.default_git_runner` here: it deliberately treats exit 1
+    as success, because for `git grep` exit 1 means "no matches". For
+    `merge-base --is-ancestor`, exit 1 means "NOT an ancestor" and must refuse
+    the graph — sharing the lenient runner would let a stale graph sail through
+    the one check built to stop it.
+    """
+    root = Path(repo_root)
+
+    def run(args: Sequence[str]) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            raise GitError(
+                f"git {' '.join(args)} exited {result.returncode}: "
+                f"{result.stderr.strip()[:200]}"
+            )
+        return result.stdout
+
+    return run
 
 SUPPORTED_VERSION = 1
 
