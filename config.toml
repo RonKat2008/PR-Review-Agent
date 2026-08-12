@@ -31,15 +31,17 @@ read_only = false
 owner = "example-org"
 name = "service-a"
 read_only = true
-# TODO: set to a local checkout once cloned (see docs/FINAL-PLAN.md section 3).
-repo_root = ""
+# Local checkout. Note: git-grep-based call sites read the working tree, which
+# may sit on a feature branch; the graph freshness check uses origin/<base>
+# and is unaffected.
+repo_root = "M:/service-a/service-a"
 graph_path = "graphs/service-a-cochange.json"
 
 [[repos]]
 owner = "example-org"
 name = "service-b"
 read_only = true
-repo_root = ""
+repo_root = "M:/service-a/service-b"
 graph_path = "graphs/service-b-cochange.json"
 
 [schedule]
