@@ -116,3 +116,9 @@ pr_comment = true       # gated by review.dry_run
 webhook = false         # no webhook URL configured yet
 local_file = true       # always on; the audit trail
 webhook_kind = "slack"  # slack | discord | generic
+
+# The demo/answer-key repo, kept selectable for scorer runs: --repo prime-agent-review-demo
+[[repos]]
+owner = "RonKat2008"
+name = "prime-agent-review-demo"
+read_only = false

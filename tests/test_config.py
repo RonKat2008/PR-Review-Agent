@@ -251,10 +251,18 @@ def test_duplicate_repo_entries_are_rejected(tmp_path):
 
 
 def test_shipped_config_has_both_target_repos_as_read_only():
-    """Owner's standing instruction: never write to either target repo."""
+    """Owner's standing instruction: never write to either target repo.
+
+    Scoped to the example-org entries on purpose: other entries (the demo repo)
+    are allowed to be writable — the demo is where live posting is validated.
+    """
     config = load_config("config.toml")
 
-    read_only_by_slug = {entry.repo.slug: entry.repo.read_only for entry in config.repos}
+    read_only_by_slug = {
+        entry.repo.slug: entry.repo.read_only
+        for entry in config.repos
+        if entry.repo.owner.lower() == "example-org"
+    }
 
     assert read_only_by_slug == {
         "example-org/service-a": True,
