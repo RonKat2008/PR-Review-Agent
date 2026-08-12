@@ -213,6 +213,57 @@ def test_static_analysis_findings_are_injected_when_repo_root_is_set(tmp_path):
     assert "B608" in seen[0], "linter evidence should reach the model"
 
 
+def test_rejected_findings_are_suppressed_with_an_audit_note(tmp_path):
+    """A finding maintainers rejected (P6) is filtered out, and the outcome says so."""
+    from prime_pr_review.feedback import Rejection, claim_fingerprint
+
+    gh = gh_with(make_pr(number=1))
+    rejection = Rejection(
+        file="src/app.py",
+        claim_fingerprint=claim_fingerprint("Off-by-one in the loop bound"),
+        reason="false positive",
+        pr_number=99,
+        rejected_at="2026-08-11T00:00:00+00:00",
+    )
+
+    report, _ = sweep_lane(
+        make_config(), LANE_OPEN, reviewer_returning(VERDICT_WITH_BUG),
+        State.empty(), gh, tmp_path, NOW,
+        enrichment=Enrichment(rejections=(rejection,)),
+    )
+
+    outcome = report.outcomes[0]
+    assert outcome.verdict is not None
+    assert outcome.verdict.introduces == (), "the rejected finding must not survive"
+    assert any("suppressed by maintainer feedback" in n for n in outcome.notes)
+
+
+def test_rejection_guidance_reaches_the_review_prompt(tmp_path):
+    from prime_pr_review.feedback import Rejection, claim_fingerprint
+
+    gh = gh_with(make_pr(number=1))
+    seen: list[str] = []
+
+    def reviewer(pr, payload, lane):
+        seen.append(payload)
+        return VERDICT_WITH_BUG
+
+    rejection = Rejection(
+        file="src/other.py",
+        claim_fingerprint=claim_fingerprint("some other complaint"),
+        reason="wontfix",
+        pr_number=7,
+        rejected_at="2026-08-11T00:00:00+00:00",
+    )
+
+    sweep_lane(
+        make_config(), LANE_OPEN, reviewer, State.empty(), gh, tmp_path, NOW,
+        enrichment=Enrichment(rejections=(rejection,)),
+    )
+
+    assert "rejected" in seen[0].lower(), "guidance block should be in the payload"
+
+
 def test_findings_are_delivered_as_line_anchored_review_comments(tmp_path):
     """Delivery goes through the reviews API, not a single trailing comment."""
     gh = gh_with(make_pr(number=1))

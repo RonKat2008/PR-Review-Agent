@@ -22,6 +22,7 @@ from .analysis import AnalysisResult
 from .blast import analyze_blast_radius, extract_changed_symbols
 from .context import GitRunner
 from .diffs import split_by_file
+from .feedback import Rejection, filter_rejected, render_rejection_guidance
 from .reviews_api import commentable_lines
 from .config import Config, Secrets
 from .diffs import filter_diff
@@ -73,6 +74,10 @@ class Enrichment:
     git_runner: GitRunner | None = None
     # Static-analysis pre-pass; None disables it.
     analysis_fn: AnalysisFn | None = None
+    # Maintainer feedback (P6): findings previously rejected with a thumbs-down
+    # or dismissal reply. Injected as prompt guidance AND enforced as a
+    # post-verdict filter; suppressions are recorded on the outcome, never silent.
+    rejections: tuple[Rejection, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -203,6 +208,9 @@ def _review_one(
     verdict, blast_notes = _attach_blast(config, pr, filtered.text, verdict, enrichment)
     notes += blast_notes
 
+    verdict, suppression_notes = _apply_feedback(verdict, enrichment)
+    notes += suppression_notes
+
     body = render_review(pr, verdict, lane)
     local_path = write_local(pr, verdict, body, lane, reviews_dir) if config.sinks.local_file else None
     outcome = post_pr_comment(config, pr, verdict, body, budget, runner, diff=filtered.text)
@@ -275,6 +283,10 @@ def _build_payload(
         parts.append(analysis_part)
     notes.extend(analysis_notes)
 
+    guidance = render_rejection_guidance(enrichment.rejections)
+    if guidance:
+        parts.append(guidance)
+
     return "\n\n".join(parts), tuple(notes)
 
 
@@ -308,6 +320,30 @@ def _graph_section(
     diff_files = tuple(f.path for f in split_by_file(diff))
     symbol_ids = tuple(f"{s.file}::{s.name}" for s in extract_changed_symbols(diff))
     return graph_mod.render(graph, diff_files, symbol_ids), ()
+
+
+def _apply_feedback(
+    verdict: Verdict,
+    enrichment: Enrichment | None,
+) -> tuple[Verdict, tuple[str, ...]]:
+    """Suppress findings maintainers already rejected (P6).
+
+    Suppression is auditable, never silent: every dropped finding is named in the
+    outcome notes. The prompt guidance usually prevents these findings from being
+    produced at all; this filter is the hard guarantee when it does not.
+    """
+    if enrichment is None or not enrichment.rejections or not verdict.introduces:
+        return verdict, ()
+
+    kept, suppressed = filter_rejected(verdict.introduces, enrichment.rejections)
+    if not suppressed:
+        return verdict, ()
+
+    notes = tuple(
+        f"suppressed by maintainer feedback: {f.file} — {f.claim[:80]}"
+        for f in suppressed
+    )
+    return replace(verdict, introduces=kept), notes
 
 
 def _analysis_section(

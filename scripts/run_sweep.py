@@ -25,6 +25,7 @@ from prime_pr_review.config import (  # noqa: E402
     require_repo,
     resolve_active,
 )
+from prime_pr_review.feedback import FeedbackError, load_rejections  # noqa: E402
 from prime_pr_review.graph import strict_runner  # noqa: E402
 from prime_pr_review.reviewers import gemini_model_fn, gemini_reviewer  # noqa: E402
 from prime_pr_review.state import (  # noqa: E402
@@ -43,8 +44,25 @@ AUTH_FILE = Path.home() / ".prime" / "agent" / "auth.json"
 # state, and reviews must not follow it there.
 AGENT_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = AGENT_ROOT / "skills" / "pr-review" / "prompts"
-STATE_FILE = AGENT_ROOT / "state" / "watermark.json"
+LEGACY_STATE_FILE = AGENT_ROOT / "state" / "watermark.json"
 REVIEWS_DIR = AGENT_ROOT / "reviews"
+REJECTIONS_FILE = AGENT_ROOT / "state" / "rejections.json"
+
+
+def state_file_for(repo_slug: str) -> tuple[Path, Path]:
+    """(load_from, save_to) watermark paths for one repo.
+
+    PR numbers are only unique within one repository — a shared watermark would
+    put service-a #100 and service-b #100 in the same namespace. Saves always go to
+    the per-repo file; loading falls back to the legacy shared file exactly once
+    (when no per-repo file exists yet) so demo history migrates rather than
+    being re-reviewed.
+    """
+    per_repo = AGENT_ROOT / "state" / f"watermark-{repo_slug.replace('/', '-')}.json"
+    load_from = per_repo
+    if not per_repo.exists() and LEGACY_STATE_FILE.exists():
+        load_from = LEGACY_STATE_FILE
+    return load_from, per_repo
 
 
 def resolve_api_key() -> str:
@@ -160,11 +178,18 @@ def main() -> int:
             return 1
         runner = github.single_pr_runner(runner, _single_pr_list_json(target_pr))
 
-    state = load_state(STATE_FILE)
+    state_load_path, state_save_path = state_file_for(repo.slug)
+    state = load_state(state_load_path)
     if args.fresh:
         from prime_pr_review.state import State
 
         state = State.empty()
+
+    try:
+        rejections = load_rejections(REJECTIONS_FILE)
+    except FeedbackError as exc:
+        print(f"Warning: rejection store unreadable, continuing without it: {exc}")
+        rejections = ()
 
     mode = "DRY RUN (nothing posts)" if config.review.dry_run else "LIVE (will comment)"
     print(f"Sweeping {repo.slug} | lane={lane} | model={args.model} | {mode}\n")
@@ -180,6 +205,7 @@ def main() -> int:
         # graph, refuse" — the lenient grep runner would swallow it.
         git_runner=strict_runner(root_path) if config.review.repo_root else None,
         analysis_fn=run_analysis,
+        rejections=rejections,
     )
 
     report, state = sweep_lane(
@@ -191,7 +217,7 @@ def main() -> int:
         enrichment=enrichment,
         reviews_dir=REVIEWS_DIR,
     )
-    save_state(state, STATE_FILE)
+    save_state(state, state_save_path)
 
     for line in report.summaries():
         print(f"  {line}")
