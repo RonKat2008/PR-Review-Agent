@@ -1,4 +1,4 @@
-"""`render_review` — the structured PR review template (IMPROVEMENT-PLAN.md §5)."""
+"""`render_review` — the owner's fixed six-section PR review template."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ from prime_pr_review.review import (
     BlastRadius,
     BrokenCaller,
     Finding,
+    FileChange,
     FixClaim,
+    ManualCheck,
     Scope,
     ScopeIssue,
     Severity,
@@ -18,6 +20,15 @@ from prime_pr_review.template import render_review
 from .conftest import make_pr
 
 EMPTY_VERDICT = Verdict(introduces=(), fixes=(), confidence=0.95)
+
+SECTION_HEADINGS = (
+    "### 1 · Intent",
+    "### 2 · Changes by file",
+    "### 3 · Issues",
+    "### 4 · Proposed changes",
+    "### 5 · What to test",
+    "### 6 · Verdict",
+)
 
 
 def _finding(
@@ -41,6 +52,24 @@ def _finding(
         line_end=line_end,
         corroboration=corroboration,
     )
+
+
+def _file_change(
+    *,
+    file: str = "shop/customers.py",
+    summary: str = "Adds a helper for computing tax",
+    relation: str = "serves_intent",
+) -> FileChange:
+    return FileChange(file=file, summary=summary, relation=relation)
+
+
+def _manual_check(
+    *,
+    feature: str = "Customer search",
+    files: tuple[str, ...] = ("shop/customers.py",),
+    steps: str = "Open the customer list, search by name, confirm results appear.",
+) -> ManualCheck:
+    return ManualCheck(feature=feature, files=files, steps=steps)
 
 
 # --- marker -------------------------------------------------------------------
@@ -96,22 +125,22 @@ def test_merged_lane_heading_differs_from_open_lane():
     assert "post-merge" not in open_body
 
 
-# --- verdict callout --------------------------------------------------------------
+# --- one-line verdict callout ------------------------------------------------------
 
 
-def test_callout_reports_no_blocking_issues_when_verdict_is_silent():
+def test_callout_reports_clean_when_verdict_is_silent():
     body = render_review(make_pr(), EMPTY_VERDICT, LANE_OPEN)
 
-    assert "> No blocking issues found." in body
+    assert "> ✅ **Clean** — no blocking issues, no scope concerns." in body
 
 
-def test_callout_names_the_count_and_top_finding_when_blocking():
+def test_callout_states_the_blocking_count():
     verdict = Verdict(introduces=(_finding(),), fixes=(), confidence=0.9)
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    callout_line = next(line for line in body.splitlines() if line.startswith("> **BLOCKING"))
-    assert callout_line == "> **BLOCKING 1 issue** — SQL injection in `shop/customers.py:15`"
+    callout_line = next(line for line in body.splitlines() if line.startswith("> ⛔"))
+    assert callout_line == "> ⛔ **1 blocking issue**"
 
 
 def test_callout_pluralizes_when_more_than_one_blocking_issue():
@@ -126,7 +155,7 @@ def test_callout_pluralizes_when_more_than_one_blocking_issue():
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "> **BLOCKING 2 issues**" in body
+    assert "> ⛔ **2 blocking issues**" in body
 
 
 def test_callout_counts_broken_callers_even_with_no_findings():
@@ -136,13 +165,195 @@ def test_callout_counts_broken_callers_even_with_no_findings():
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "> **BLOCKING 1 issue**" in body
+    assert "> ⛔ **1 blocking issue**" in body
 
 
-# --- blocking vs non-blocking split ------------------------------------------------
+def test_callout_states_the_unrelated_change_count():
+    issue = ScopeIssue(
+        file="shop/auth.py", lines="22-31", severity=Severity.HIGH,
+        claim="Changes the session timeout.", evidence="Title mentions only total_price.",
+    )
+    scope = Scope(intent="Fix total_price", aligned=False, unrelated=(issue,))
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, scope=scope)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "> ⚠️ **1 unrelated change**" in body
 
 
-def test_blocking_section_contains_only_critical_and_high_findings():
+def test_callout_combines_blocking_and_unrelated_counts():
+    issue = ScopeIssue(
+        file="shop/auth.py", lines="22-31", severity=Severity.HIGH,
+        claim="Changes the session timeout.", evidence="Title mentions only total_price.",
+    )
+    scope = Scope(intent="Fix total_price", aligned=False, unrelated=(issue,))
+    verdict = Verdict(introduces=(_finding(),), fixes=(), confidence=0.9, scope=scope)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "> ⛔ **1 blocking issue · 1 unrelated change**" in body
+
+
+def test_callout_appears_before_section_1():
+    verdict = Verdict(introduces=(_finding(),), fixes=(), confidence=0.9)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert body.index("> ⛔") < body.index("### 1 · Intent")
+
+
+# --- section order ------------------------------------------------------------------
+
+
+def test_sections_always_render_in_the_owners_required_order():
+    verdict = Verdict(
+        introduces=(_finding(),),
+        fixes=(FixClaim(claim="fix", evidence="ev"),),
+        confidence=0.9,
+        scope=Scope(intent="Fix the thing", aligned=True),
+        blast_radius=(BlastRadius(symbol="f", kind="k", change="c"),),
+        files=(_file_change(),),
+        manual_checks=(_manual_check(),),
+    )
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    positions = [body.index(heading) for heading in SECTION_HEADINGS]
+    assert positions == sorted(positions)
+
+
+def test_every_numbered_section_is_present_even_on_a_fully_empty_verdict():
+    body = render_review(make_pr(), EMPTY_VERDICT, LANE_OPEN)
+
+    for heading in SECTION_HEADINGS:
+        assert heading in body
+
+
+# --- 1 · Intent -----------------------------------------------------------------
+
+
+def test_intent_renders_the_stated_intent_when_scope_is_present():
+    scope = Scope(intent="Fix the off-by-one in total_price", aligned=True, unrelated=())
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, scope=scope)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "Fix the off-by-one in total_price" in body
+
+
+def test_intent_renders_even_when_scope_is_aligned_with_no_unrelated_changes():
+    """A clean scope check and a scope check that never ran must not read the same."""
+    scope = Scope(intent="Fix the off-by-one in total_price", aligned=True, unrelated=())
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, scope=scope)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "Intent check did not run." not in body
+
+
+def test_intent_states_it_did_not_run_when_scope_is_none_never_fabricating():
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, scope=None)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    section = body.split("### 1 · Intent")[1].split("### 2")[0]
+    assert "Intent check did not run." in section
+
+
+# --- 2 · Changes by file --------------------------------------------------------
+
+
+def test_files_section_states_unavailable_when_verdict_files_is_empty():
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, files=())
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    section = body.split("### 2 · Changes by file")[1].split("### 3")[0]
+    assert "Per-file walkthrough unavailable." in section
+
+
+def test_files_section_renders_a_table_with_file_change_and_relation_columns():
+    change = _file_change(
+        file="shop/customers.py", summary="Adds raw SQL string interpolation", relation="serves_intent"
+    )
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, files=(change,))
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "| File | Change | Serves intent |" in body
+    assert "| `shop/customers.py` | Adds raw SQL string interpolation | yes |" in body
+
+
+def test_files_table_marks_unrelated_relation_as_no_with_a_warning():
+    change = _file_change(file="shop/auth.py", summary="Widens the session timeout", relation="unrelated")
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, files=(change,))
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "| `shop/auth.py` | Widens the session timeout | ⚠ no |" in body
+
+
+def test_files_table_marks_mechanical_relation_without_a_warning():
+    change = _file_change(file="uv.lock", summary="Lockfile bump", relation="mechanical")
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, files=(change,))
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "| `uv.lock` | Lockfile bump | mechanical |" in body
+
+
+def test_files_table_folds_scope_unrelated_markers_onto_matching_rows():
+    """A file the walkthrough itself called serves_intent still gets ⚠ when the
+    (separately gathered) intent check flags it in scope.unrelated."""
+    change = _file_change(file="shop/auth.py", summary="Widens the session timeout", relation="serves_intent")
+    issue = ScopeIssue(
+        file="shop/auth.py", lines="22-31", severity=Severity.HIGH,
+        claim="Not part of the stated intent.", evidence="Title mentions only total_price.",
+    )
+    scope = Scope(intent="Fix total_price", aligned=False, unrelated=(issue,))
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, files=(change,), scope=scope)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "| `shop/auth.py` | Widens the session timeout | ⚠ yes |" in body
+
+
+def test_files_table_folds_rows_beyond_the_most_important_fifteen():
+    unrelated = _file_change(file="scope/creep.py", relation="unrelated")
+    ordinary = tuple(
+        _file_change(file=f"pkg/mod_{i}.py", relation="serves_intent") for i in range(15)
+    )
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, files=(unrelated, *ordinary))
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "<details><summary>1 more file</summary>" in body
+    before, _, after = body.partition("<details>")
+    assert "scope/creep.py" in before
+    assert before.count("| `pkg/mod_") == 14
+    assert "pkg/mod_14.py" in after
+
+
+def test_files_table_does_not_fold_when_fifteen_or_fewer():
+    files = tuple(_file_change(file=f"pkg/mod_{i}.py") for i in range(15))
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, files=files)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "<details>" not in body
+
+
+# --- 3 · Issues --------------------------------------------------------------------
+
+
+def test_issues_section_states_none_found_when_there_are_no_findings():
+    body = render_review(make_pr(), EMPTY_VERDICT, LANE_OPEN)
+
+    section = body.split("### 3 · Issues")[1].split("### 4")[0]
+    assert "No issues found." in section
+
+
+def test_issues_section_contains_only_critical_and_high_findings_visibly():
     verdict = Verdict(
         introduces=(
             _finding(severity=Severity.CRITICAL, claim="critical one", file="a.py"),
@@ -155,17 +366,17 @@ def test_blocking_section_contains_only_critical_and_high_findings():
     )
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
-    blocking, _, non_blocking = body.partition("### \U0001f4a1 Non-blocking")
+    visible, _, hidden = body.partition("<details>")
 
-    assert "critical one" in blocking
-    assert "high one" in blocking
-    assert "medium one" not in blocking
-    assert "low one" not in blocking
-    assert "medium one" in non_blocking
-    assert "low one" in non_blocking
+    assert "critical one" in visible
+    assert "high one" in visible
+    assert "medium one" not in visible
+    assert "low one" not in visible
+    assert "medium one" in hidden
+    assert "low one" in hidden
 
 
-def test_blocking_findings_are_ordered_by_severity_then_file():
+def test_issues_are_ordered_by_severity_then_file():
     verdict = Verdict(
         introduces=(
             _finding(severity=Severity.HIGH, claim="high one", file="b.py"),
@@ -180,82 +391,18 @@ def test_blocking_findings_are_ordered_by_severity_then_file():
     assert body.index("critical one") < body.index("high one")
 
 
-def test_blocking_section_includes_broken_callers_regardless_of_their_severity():
-    caller = BrokenCaller(
-        file="shop/invoice.py", line=44, severity=Severity.LOW, claim="calls with one argument"
-    )
-    blast = BlastRadius(
-        symbol="total_price", kind="signature_change", change="added tax_rate", breaks=(caller,)
-    )
-    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, blast_radius=(blast,))
-
-    body = render_review(make_pr(), verdict, LANE_OPEN)
-
-    assert "### ⛔ Blocking" in body
-    assert "breaks `total_price`" in body
-    assert "calls with one argument" in body
-
-
-# --- non-blocking details wrapper --------------------------------------------------
-
-
-def test_non_blocking_findings_are_wrapped_in_a_details_element():
-    verdict = Verdict(
-        introduces=(_finding(severity=Severity.MEDIUM, claim="bare except"),), fixes=(), confidence=0.9
-    )
-
-    body = render_review(make_pr(), verdict, LANE_OPEN)
-
-    assert "<details><summary>1 suggestion</summary>" in body
-    assert "bare except" in body
-    assert "</details>" in body
-
-
-def test_non_blocking_summary_pluralizes_the_suggestion_count():
-    verdict = Verdict(
-        introduces=(
-            _finding(severity=Severity.MEDIUM, claim="one", file="a.py"),
-            _finding(severity=Severity.LOW, claim="two", file="b.py"),
-        ),
-        fixes=(),
-        confidence=0.9,
-    )
-
-    body = render_review(make_pr(), verdict, LANE_OPEN)
-
-    assert "<details><summary>2 suggestions</summary>" in body
-
-
-# --- suggestion blocks --------------------------------------------------------------
-
-
-def test_finding_with_a_suggestion_renders_a_committable_suggestion_block():
-    finding = _finding(suggestion='    query = "SELECT id FROM customers WHERE name LIKE ?"')
+def test_issue_narrative_reports_severity_location_claim_evidence_and_corroboration():
+    finding = _finding(corroboration="bandit:B608")
     verdict = Verdict(introduces=(finding,), fixes=(), confidence=0.9)
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "```suggestion" in body
-    assert 'query = "SELECT id FROM customers WHERE name LIKE ?"' in body
-
-
-def test_finding_without_a_suggestion_renders_no_suggestion_block():
-    verdict = Verdict(introduces=(_finding(suggestion=""),), fixes=(), confidence=0.9)
-
-    body = render_review(make_pr(), verdict, LANE_OPEN)
-
-    assert "```suggestion" not in body
-
-
-def test_finding_with_corroboration_reports_it():
-    verdict = Verdict(introduces=(_finding(corroboration="bandit:B608"),), fixes=(), confidence=0.9)
-
-    body = render_review(make_pr(), verdict, LANE_OPEN)
-
+    assert "**CRITICAL · `shop/customers.py:15` · SQL injection**" in body
+    assert "User input is interpolated into a query string." in body
     assert "corroborated by `bandit:B608`" in body
 
 
-def test_finding_without_corroboration_omits_the_corroboration_line():
+def test_issue_narrative_omits_corroboration_line_when_absent():
     verdict = Verdict(introduces=(_finding(corroboration=""),), fixes=(), confidence=0.9)
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
@@ -263,7 +410,18 @@ def test_finding_without_corroboration_omits_the_corroboration_line():
     assert "corroborated by" not in body
 
 
-def test_finding_location_reports_a_multiline_range_when_line_end_differs():
+def test_issues_section_never_renders_a_suggestion_fence():
+    """Suggestion fences are section 4's job now, not section 3's."""
+    finding = _finding(suggestion='    query = "SELECT id FROM customers WHERE name LIKE ?"')
+    verdict = Verdict(introduces=(finding,), fixes=(), confidence=0.9)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+    issues_section = body.split("### 3 · Issues")[1].split("### 4")[0]
+
+    assert "```suggestion" not in issues_section
+
+
+def test_issue_location_reports_a_multiline_range_when_line_end_differs():
     finding = _finding(line=22, line_end=31, claim="session timeout change")
     verdict = Verdict(introduces=(finding,), fixes=(), confidence=0.9)
 
@@ -272,7 +430,7 @@ def test_finding_location_reports_a_multiline_range_when_line_end_differs():
     assert "shop/customers.py:22-31" in body
 
 
-def test_finding_with_no_line_reports_only_the_file():
+def test_issue_with_no_line_reports_only_the_file():
     finding = _finding(line=None, claim="module-level issue")
     verdict = Verdict(introduces=(finding,), fixes=(), confidence=0.9)
 
@@ -282,81 +440,76 @@ def test_finding_with_no_line_reports_only_the_file():
     assert "shop/customers.py:" not in body
 
 
-# --- scope ----------------------------------------------------------------------
+# --- 4 · Proposed changes -----------------------------------------------------------
 
 
-def test_scope_renders_when_aligned_with_no_unrelated_changes():
-    scope = Scope(intent="Fix the off-by-one in total_price", aligned=True, unrelated=())
-    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, scope=scope)
+def test_proposed_changes_states_none_when_no_finding_has_a_suggestion():
+    verdict = Verdict(introduces=(_finding(suggestion=""),), fixes=(), confidence=0.9)
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "### \U0001f3af Scope" in body
-    assert "Fix the off-by-one in total_price" in body
-    assert "Every change serves the stated intent" in body
+    section = body.split("### 4 · Proposed changes")[1].split("### 5")[0]
+    assert "No committable suggestions for this diff." in section
 
 
-def test_scope_lists_unrelated_changes_when_present():
-    issue = ScopeIssue(
-        file="shop/auth.py",
-        lines="22-31",
-        severity=Severity.HIGH,
-        claim="Changes the session timeout.",
-        evidence="Title and body mention only total_price.",
+def test_proposed_changes_renders_a_committable_suggestion_fence_with_a_location_caption():
+    finding = _finding(
+        line=15, suggestion='    query = "SELECT id FROM customers WHERE name LIKE ?"'
     )
-    scope = Scope(intent="Fix total_price", aligned=False, unrelated=(issue,))
-    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, scope=scope)
+    verdict = Verdict(introduces=(finding,), fixes=(), confidence=0.9)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+    section = body.split("### 4 · Proposed changes")[1].split("### 5")[0]
+
+    assert "`shop/customers.py:15`" in section
+    assert "```suggestion" in section
+    assert 'query = "SELECT id FROM customers WHERE name LIKE ?"' in section
+
+
+def test_proposed_changes_notes_that_suggestions_post_as_inline_comments():
+    finding = _finding(suggestion="fixed = True")
+    verdict = Verdict(introduces=(finding,), fixes=(), confidence=0.9)
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "1 change do not serve that intent" in body or "1 change" in body
-    assert "shop/auth.py:22-31" in body
-    assert "Changes the session timeout." in body
+    assert "<sub>These post as one-click commitable comments on the diff lines" in body
 
 
-def test_scope_section_is_omitted_when_scope_is_none():
-    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, scope=None)
+def test_proposed_changes_includes_non_blocking_findings_with_suggestions_too():
+    finding = _finding(severity=Severity.LOW, claim="tidy this up", suggestion="x = 1")
+    verdict = Verdict(introduces=(finding,), fixes=(), confidence=0.9)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+    section = body.split("### 4 · Proposed changes")[1].split("### 5")[0]
+
+    assert "x = 1" in section
+
+
+# --- 5 · What to test — impact analysis (5a) ----------------------------------------
+
+
+def test_impact_analysis_states_unavailable_when_blast_radius_is_empty():
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, blast_radius=())
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "### \U0001f3af Scope" not in body
+    assert "**Impact analysis**" in body
+    assert "No impact analysis available for this diff." in body
 
 
-# --- blast radius -------------------------------------------------------------------
-
-
-def test_blast_radius_reports_the_total_checked_not_just_the_breaks():
-    caller = BrokenCaller(file="shop/invoice.py", line=44, severity=Severity.HIGH, claim="breaks")
-    blast = BlastRadius(
-        symbol="total_price",
-        kind="signature_change",
-        change="added required parameter tax_rate",
-        breaks=(caller,),
-        unbroken_callers=3,
-    )
-    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, blast_radius=(blast,))
-
-    body = render_review(make_pr(), verdict, LANE_OPEN)
-
-    assert "Checked **4** call site(s)" in body
-    assert "**1** break(s)" in body
-
-
-def test_blast_radius_table_includes_a_row_per_broken_caller():
+def test_impact_analysis_lists_every_broken_caller_as_a_test_target():
     caller = BrokenCaller(
         file="shop/invoice.py", line=44, severity=Severity.HIGH, claim="raises TypeError"
     )
-    blast = BlastRadius(
-        symbol="total_price", kind="signature_change", change="x", breaks=(caller,)
-    )
+    blast = BlastRadius(symbol="total_price", kind="signature_change", change="x", breaks=(caller,))
     verdict = Verdict(introduces=(), fixes=(), confidence=0.9, blast_radius=(blast,))
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "| `shop/invoice.py:44` | ⛔ raises TypeError |" in body
+    assert "- test `shop/invoice.py:44` — raises TypeError" in body
 
 
-def test_blast_radius_summarizes_unbroken_callers_when_no_breaks():
+def test_impact_analysis_states_unbroken_caller_counts_per_symbol():
     blast = BlastRadius(
         symbol="total_price", kind="signature_change", change="x", breaks=(), unbroken_callers=4
     )
@@ -364,71 +517,147 @@ def test_blast_radius_summarizes_unbroken_callers_when_no_breaks():
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "Checked **4** call site(s)" in body
-    assert "**0** break(s)" in body
-    assert "4 other call site(s) of `total_price` checked; no issues found" in body
+    assert "4 other call site(s) of `total_price` checked clean — smoke-test the callers of `total_price`" in body
 
 
-def test_blast_radius_section_is_omitted_when_blast_radius_is_empty():
-    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, blast_radius=())
-
-    body = render_review(make_pr(), verdict, LANE_OPEN)
-
-    assert "### \U0001f4a5 Blast radius" not in body
-
-
-# --- fixes ------------------------------------------------------------------------
-
-
-def test_fixes_section_lists_fix_claims_and_evidence():
-    fix = FixClaim(claim="Guards order_summary against a missing order", evidence="TypeError on None subscript")
-    verdict = Verdict(introduces=(), fixes=(fix,), confidence=0.9)
+def test_impact_analysis_never_invents_a_target_when_symbols_had_zero_call_sites():
+    blast = BlastRadius(symbol="helper", kind="signature_change", change="x")
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, blast_radius=(blast,))
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
 
-    assert "### ✅ Fixes in this PR" in body
-    assert "Guards order_summary against a missing order" in body
-    assert "TypeError on None subscript" in body
+    assert "No call sites were found for the changed symbols." in body
+    assert "test `" not in body
 
 
-def test_fixes_section_is_omitted_when_there_are_no_fixes():
+# --- 5 · What to test — manual checks (5b) ------------------------------------------
+
+
+def test_manual_checks_subsection_is_omitted_entirely_when_there_are_none():
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, manual_checks=())
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "**Manual checks**" not in body
+
+
+def test_manual_checks_render_with_the_justifying_files_cited():
+    check = _manual_check(
+        feature="Space Tools toolbar",
+        files=("src/components/SpaceTools/Toolbar.tsx", "src/components/SpaceTools/Panel.tsx"),
+        steps="Open a Space, run each tool in the toolbar, confirm results render.",
+    )
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, manual_checks=(check,))
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "**Manual checks**" in body
+    assert (
+        "- **Space Tools toolbar** "
+        "(`src/components/SpaceTools/Toolbar.tsx`, `src/components/SpaceTools/Panel.tsx`): "
+        "Open a Space, run each tool in the toolbar, confirm results render." in body
+    )
+
+
+def test_manual_checks_carry_a_provenance_label():
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, manual_checks=(_manual_check(),))
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert (
+        "<sub>suggested from the features these files belong to — "
+        "not an exhaustive QA plan</sub>" in body
+    )
+
+
+def test_manual_checks_render_even_when_impact_analysis_is_unavailable():
+    verdict = Verdict(
+        introduces=(), fixes=(), confidence=0.9, blast_radius=(), manual_checks=(_manual_check(),)
+    )
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+
+    assert "No impact analysis available for this diff." in body
+    assert "**Manual checks**" in body
+
+
+# --- 6 · Verdict ---------------------------------------------------------------------
+
+
+def test_verdict_summary_states_no_blocking_issues_when_clean():
     body = render_review(make_pr(), EMPTY_VERDICT, LANE_OPEN)
 
-    assert "### ✅ Fixes in this PR" not in body
+    section = body.split("### 6 · Verdict")[1].split("<sub>")[0]
+    assert "No blocking issues were found." in section
+    assert "No changes are required before merging." in section
 
 
-# --- sections omitted when empty ----------------------------------------------------
+def test_verdict_summary_reflects_blocking_finding_and_broken_caller_counts():
+    caller = BrokenCaller(file="shop/invoice.py", line=44, severity=Severity.HIGH, claim="breaks")
+    blast = BlastRadius(symbol="total_price", kind="signature_change", change="x", breaks=(caller,))
+    verdict = Verdict(
+        introduces=(_finding(severity=Severity.CRITICAL),), fixes=(), confidence=0.9, blast_radius=(blast,)
+    )
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+    section = body.split("### 6 · Verdict")[1]
+
+    assert "1 blocking finding" in section
+    assert "1 broken caller" in section
+    assert "Do not merge until these are resolved." in section
 
 
-def test_blocking_section_is_omitted_when_there_is_nothing_blocking():
+def test_verdict_summary_reflects_scope_alignment():
+    issue = ScopeIssue(
+        file="shop/auth.py", lines="22-31", severity=Severity.HIGH,
+        claim="Not part of the stated intent.", evidence="ev",
+    )
+    scope = Scope(intent="Fix total_price", aligned=False, unrelated=(issue,))
+    verdict = Verdict(introduces=(), fixes=(), confidence=0.9, scope=scope)
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+    section = body.split("### 6 · Verdict")[1]
+
+    assert "1 change falls outside the stated intent." in section
+
+
+def test_verdict_summary_reflects_fix_count():
+    verdict = Verdict(
+        introduces=(), fixes=(FixClaim(claim="Guards against a null user", evidence="ev"),), confidence=0.9
+    )
+
+    body = render_review(make_pr(), verdict, LANE_OPEN)
+    section = body.split("### 6 · Verdict")[1]
+
+    assert "It also fixes 1 known bug." in section
+
+
+def test_verdict_summary_recommends_no_changes_required_when_not_blocking():
     verdict = Verdict(introduces=(_finding(severity=Severity.LOW),), fixes=(), confidence=0.9)
 
     body = render_review(make_pr(), verdict, LANE_OPEN)
+    section = body.split("### 6 · Verdict")[1]
 
-    assert "### ⛔ Blocking" not in body
-
-
-def test_non_blocking_section_is_omitted_when_there_is_nothing_non_blocking():
-    verdict = Verdict(introduces=(_finding(severity=Severity.CRITICAL),), fixes=(), confidence=0.9)
-
-    body = render_review(make_pr(), verdict, LANE_OPEN)
-
-    assert "### \U0001f4a1 Non-blocking" not in body
+    assert "No changes are required before merging." in section
 
 
-# --- minimal document / footer -----------------------------------------------------
+# --- silence property / minimal document --------------------------------------------
 
 
-def test_empty_verdict_produces_a_minimal_sane_document():
+def test_empty_verdict_produces_a_short_document_with_every_section_stating_unavailable():
     body = render_review(make_pr(), EMPTY_VERDICT, LANE_OPEN)
 
     assert body.startswith(build_marker(make_pr().head_sha))
-    assert "> No blocking issues found." in body
-    assert "### ⛔ Blocking" not in body
-    assert "### \U0001f4a1 Non-blocking" not in body
-    assert "### \U0001f3af Scope" not in body
-    assert "### \U0001f4a5 Blast radius" not in body
-    assert "### ✅ Fixes in this PR" not in body
+    assert "> ✅ **Clean**" in body
+    assert "Intent check did not run." in body
+    assert "Per-file walkthrough unavailable." in body
+    assert "No issues found." in body
+    assert "No committable suggestions for this diff." in body
+    assert "No impact analysis available for this diff." in body
+    assert "**Manual checks**" not in body
+    assert "<details>" not in body
+    assert "```suggestion" not in body
+    assert "| File | Change | Serves intent |" not in body
     assert "<sub>" in body
 
 
@@ -436,6 +665,9 @@ def test_footer_carries_a_feedback_affordance():
     body = render_review(make_pr(), EMPTY_VERDICT, LANE_OPEN)
 
     assert "@prime-bot recheck" in body
+
+
+# --- purity / hook compatibility ------------------------------------------------------
 
 
 def test_render_review_is_a_pure_function_of_its_inputs():

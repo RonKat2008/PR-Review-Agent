@@ -159,3 +159,162 @@ def test_findings_are_ordered_by_severity():
     body = render_markdown(make_pr(), parse_verdict(raw), LANE_OPEN)
 
     assert body.index("critical one") < body.index("low one")
+
+
+# --- FileChange parsing (per-file walkthrough) --------------------------------------
+
+
+def test_files_parses_when_present():
+    raw = (
+        '{"introduces":[],"fixes":[],"confidence":0.9,'
+        '"files":[{"file":"a.py","summary":"Adds a helper","relation":"serves_intent"}]}'
+    )
+
+    verdict = parse_verdict(raw)
+
+    assert len(verdict.files) == 1
+    assert verdict.files[0].file == "a.py"
+    assert verdict.files[0].summary == "Adds a helper"
+    assert verdict.files[0].relation == "serves_intent"
+
+
+def test_files_key_absent_defaults_to_empty_tuple():
+    assert parse_verdict(VERDICT_WITH_BUG).files == ()
+
+
+def test_files_null_defaults_to_empty_tuple():
+    raw = '{"introduces":[],"fixes":[],"confidence":0.9,"files":null}'
+
+    assert parse_verdict(raw).files == ()
+
+
+def test_files_empty_array_is_empty_tuple():
+    raw = '{"introduces":[],"fixes":[],"confidence":0.9,"files":[]}'
+
+    assert parse_verdict(raw).files == ()
+
+
+def test_files_malformed_entries_are_skipped_without_failing_the_whole_verdict():
+    """One bad row costs only that row -- unlike `introduces`/`fixes`, a
+    malformed per-file entry must not blow up the entire verdict."""
+    raw = (
+        '{"introduces":[],"fixes":[],"confidence":0.9,"files":['
+        '{"file":"good.py","summary":"ok","relation":"serves_intent"},'
+        '{"file":"","summary":"missing file","relation":"serves_intent"},'
+        '{"file":"nosum.py","summary":"","relation":"serves_intent"},'
+        '{"file":"bad.py","summary":"bad relation","relation":"made_up"},'
+        '"not-an-object"'
+        "]}"
+    )
+
+    verdict = parse_verdict(raw)
+
+    assert len(verdict.files) == 1
+    assert verdict.files[0].file == "good.py"
+
+
+def test_files_value_that_is_not_an_array_raises():
+    """The whole array being unusable (not array-shaped at all) is the one
+    case that does fail the verdict -- unlike a single malformed entry."""
+    raw = '{"introduces":[],"fixes":[],"confidence":0.9,"files":"oops"}'
+
+    with pytest.raises(VerdictError, match="'files' must be a JSON array"):
+        parse_verdict(raw)
+
+
+# --- ManualCheck parsing (manual smoke-test suggestions) ----------------------------
+
+
+def test_manual_checks_parses_when_present():
+    raw = (
+        '{"introduces":[],"fixes":[],"confidence":0.9,'
+        '"manual_checks":[{"feature":"Customer search","files":["shop/customers.py"],'
+        '"steps":"Open the customer list, search by name, confirm results appear."}]}'
+    )
+
+    verdict = parse_verdict(raw)
+
+    assert len(verdict.manual_checks) == 1
+    check = verdict.manual_checks[0]
+    assert check.feature == "Customer search"
+    assert check.files == ("shop/customers.py",)
+    assert check.steps == "Open the customer list, search by name, confirm results appear."
+
+
+def test_manual_checks_key_absent_defaults_to_empty_tuple():
+    assert parse_verdict(VERDICT_WITH_BUG).manual_checks == ()
+
+
+def test_manual_checks_null_defaults_to_empty_tuple():
+    raw = '{"introduces":[],"fixes":[],"confidence":0.9,"manual_checks":null}'
+
+    assert parse_verdict(raw).manual_checks == ()
+
+
+def test_manual_check_without_files_is_skipped():
+    """A check that cannot cite a changed file must not be emitted."""
+    raw = (
+        '{"introduces":[],"fixes":[],"confidence":0.9,'
+        '"manual_checks":[{"feature":"Ghost feature","files":[],'
+        '"steps":"Open it and look."}]}'
+    )
+
+    assert parse_verdict(raw).manual_checks == ()
+
+
+def test_manual_check_with_a_non_list_files_field_is_skipped():
+    """`files` on a single entry must itself be an array; a bare string (an
+    invalid type, not just an empty one) is malformed and dropped."""
+    raw = (
+        '{"introduces":[],"fixes":[],"confidence":0.9,'
+        '"manual_checks":[{"feature":"Ghost feature","files":"shop/customers.py",'
+        '"steps":"Open it and look."}]}'
+    )
+
+    assert parse_verdict(raw).manual_checks == ()
+
+
+def test_manual_checks_malformed_entries_are_skipped_without_failing_the_whole_verdict():
+    raw = (
+        '{"introduces":[],"fixes":[],"confidence":0.9,"manual_checks":['
+        '{"feature":"Good","files":["a.tsx"],"steps":"Open a, confirm b."},'
+        '{"feature":"","files":["a.tsx"],"steps":"missing feature"},'
+        '{"feature":"No steps","files":["a.tsx"],"steps":""},'
+        '{"feature":"No files","files":[],"steps":"Open it."},'
+        '"not-an-object"'
+        "]}"
+    )
+
+    verdict = parse_verdict(raw)
+
+    assert len(verdict.manual_checks) == 1
+    assert verdict.manual_checks[0].feature == "Good"
+
+
+def test_manual_checks_value_that_is_not_an_array_raises():
+    raw = '{"introduces":[],"fixes":[],"confidence":0.9,"manual_checks":"oops"}'
+
+    with pytest.raises(VerdictError, match="'manual_checks' must be a JSON array"):
+        parse_verdict(raw)
+
+
+def test_manual_checks_are_capped_at_three_dropping_the_rest():
+    entries = ",".join(
+        f'{{"feature":"Feature {i}","files":["f{i}.tsx"],"steps":"Open {i}."}}' for i in range(5)
+    )
+    raw = f'{{"introduces":[],"fixes":[],"confidence":0.9,"manual_checks":[{entries}]}}'
+
+    verdict = parse_verdict(raw)
+
+    assert len(verdict.manual_checks) == 3
+    assert [c.feature for c in verdict.manual_checks] == ["Feature 0", "Feature 1", "Feature 2"]
+
+
+# --- old verdicts keep parsing --------------------------------------------------------
+
+
+def test_old_style_verdict_json_without_files_or_manual_checks_still_parses():
+    verdict = parse_verdict(VERDICT_WITH_BUG)
+
+    assert verdict.files == ()
+    assert verdict.manual_checks == ()

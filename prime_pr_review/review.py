@@ -19,6 +19,14 @@ FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 BLOCKING_SEVERITIES = frozenset({"CRITICAL", "HIGH"})
 
+# The only relations a per-file walkthrough entry may declare. Any other value
+# makes that one entry unusable; see `_parse_file_change`.
+FILE_RELATIONS = ("serves_intent", "unrelated", "mechanical")
+
+# The prompt's own limit on suggested manual checks, enforced again here so a
+# non-compliant model response cannot flood the rendered checklist.
+MAX_MANUAL_CHECKS = 3
+
 
 class VerdictError(ValueError):
     """A subagent returned something that is not a usable verdict."""
@@ -119,12 +127,35 @@ class BlastRadius:
 
 
 @dataclass(frozen=True)
+class FileChange:
+    """One file's entry in the per-file walkthrough: what changed and whether
+    it serves the PR's stated intent (P10-ish "why this file is in the diff")."""
+
+    file: str
+    summary: str  # one line: what changed here
+    relation: str  # "serves_intent" | "unrelated" | "mechanical"
+
+
+@dataclass(frozen=True)
+class ManualCheck:
+    """A model-suggested manual smoke test for a user-facing feature this diff
+    touched. Deliberately narrow: `files` must cite the changed files that
+    justify it, so a check can never point at something the diff didn't touch."""
+
+    feature: str  # user-facing feature name, inferred from the file paths
+    files: tuple[str, ...]  # the changed files that justify this check
+    steps: str  # one concrete flow: "open X, do Y, expect Z"
+
+
+@dataclass(frozen=True)
 class Verdict:
     introduces: tuple[Finding, ...]
     fixes: tuple[FixClaim, ...]
     confidence: float
     scope: Scope | None = None
     blast_radius: tuple[BlastRadius, ...] = ()
+    files: tuple[FileChange, ...] = ()
+    manual_checks: tuple[ManualCheck, ...] = ()
 
     @property
     def broken_callers(self) -> tuple[BrokenCaller, ...]:
@@ -176,6 +207,8 @@ def parse_verdict(raw: str) -> Verdict:
         confidence = float(payload.get("confidence", 0.0))
         scope = _parse_scope(payload.get("scope"))
         blast = tuple(_parse_blast(item) for item in payload.get("blast_radius", []))
+        files = _parse_files(payload.get("files"))
+        manual_checks = _parse_manual_checks(payload.get("manual_checks"))
     except (TypeError, ValueError, AttributeError) as exc:
         raise VerdictError(f"Verdict fields are malformed: {exc}") from exc
 
@@ -188,6 +221,8 @@ def parse_verdict(raw: str) -> Verdict:
         confidence=confidence,
         scope=scope,
         blast_radius=blast,
+        files=files,
+        manual_checks=manual_checks,
     )
 
 
@@ -248,6 +283,74 @@ def _parse_broken_caller(item: dict) -> BrokenCaller:
         severity=_parse_severity(item.get("severity")),
         claim=claim,
     )
+
+
+def _parse_files(raw: object) -> tuple[FileChange, ...]:
+    """Parse the per-file walkthrough array. Tolerant by design: a missing array
+    is a valid, unpopulated result (older prompts, or a prompt that chose not to
+    answer), and one malformed entry only costs that entry, not the rest of the
+    verdict. Only a `files` value that is not array-shaped at all -- the whole
+    thing is unusable, not just one row of it -- raises.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise VerdictError(f"'files' must be a JSON array, got {type(raw).__name__}")
+    return tuple(
+        change for change in (_parse_file_change(item) for item in raw) if change is not None
+    )
+
+
+def _parse_file_change(item: object) -> FileChange | None:
+    """One `files` entry, or None when it is malformed enough to skip."""
+    if not isinstance(item, dict):
+        return None
+    file = str(item.get("file", "")).strip()
+    summary = str(item.get("summary", "")).strip()
+    relation = str(item.get("relation", "")).strip()
+    if not file or not summary or relation not in FILE_RELATIONS:
+        return None
+    return FileChange(file=file, summary=summary, relation=relation)
+
+
+def _parse_manual_checks(raw: object) -> tuple[ManualCheck, ...]:
+    """Parse the manual-check suggestions array. Same tolerance as `_parse_files`:
+    a missing array is valid and empty, one malformed entry only costs that
+    entry, and only a `manual_checks` value that isn't array-shaped at all
+    raises. Capped at `MAX_MANUAL_CHECKS` valid entries after parsing, so a
+    non-compliant response cannot flood the rendered checklist.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise VerdictError(f"'manual_checks' must be a JSON array, got {type(raw).__name__}")
+    checks = tuple(
+        check for check in (_parse_manual_check(item) for item in raw) if check is not None
+    )
+    return checks[:MAX_MANUAL_CHECKS]
+
+
+def _parse_manual_check(item: object) -> ManualCheck | None:
+    """One `manual_checks` entry, or None when it is malformed enough to skip.
+
+    A check that cites no changed files is itself malformed -- the whole point
+    of `files` is that a suggestion must be traceable to something the diff
+    actually touched, never invented from the feature name alone.
+    """
+    if not isinstance(item, dict):
+        return None
+    feature = str(item.get("feature", "")).strip()
+    steps = str(item.get("steps", "")).strip()
+    files = _string_tuple(item.get("files"))
+    if not feature or not steps or not files:
+        return None
+    return ManualCheck(feature=feature, files=files, steps=steps)
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
 
 
 def _parse_severity(raw: object) -> Severity:

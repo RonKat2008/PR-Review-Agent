@@ -54,6 +54,43 @@ If you find nothing, return empty arrays. That is a normal and useful result.
 - `MEDIUM` — wrong behavior on an edge case, or degraded reliability
 - `LOW` — minor correctness issue with narrow impact
 
+## Per-file walkthrough
+
+Separately from the findings above, classify **every file that appears in the
+diff**. This part is not optional and not subject to the precision-over-recall
+calibration above — list every file even when a diff draws zero findings.
+
+For each file, report:
+
+- `summary` — one sentence: what changed in this file.
+- `relation` — exactly one of:
+  - `serves_intent` — the change is part of what the PR title/description says
+    it is doing.
+  - `unrelated` — the change has no visible connection to the title or
+    description. This is the signal a reviewer uses to catch scope creep.
+  - `mechanical` — fallout from another change rather than a deliberate edit:
+    a rename ripple, a generated file, a lockfile, an import reorder, pure
+    formatting.
+
+When torn between `serves_intent` and `mechanical`, prefer `mechanical` only
+when the change required no independent judgment call — a file touched only
+because a symbol it imports got renamed is mechanical; a file that needed its
+own reasoning to update correctly is not.
+
+## Manual checks
+
+Suggest a manual check on the running app **only** when changed files are
+plausibly user-facing (UI components, pages, routes, styles, templates, public
+API endpoints). Pure internal refactors, config, tests, and build tooling get
+none.
+
+- Every check **must** name the changed files that justify it (the `files`
+  field). A check that cannot cite a changed file must not be emitted.
+- Maximum 3 checks. An empty array is a normal, correct output — most diffs
+  will not touch anything user-facing.
+- `steps` must describe one concrete user flow ("open X, do Y, expect Z"), not
+  "test the feature thoroughly."
+
 ## Output
 
 Return **only** this JSON object. No prose before or after, no code fence.
@@ -75,8 +112,25 @@ Return **only** this JSON object. No prose before or after, no code fence.
       "evidence": "What in the diff shows the fix."
     }
   ],
+  "files": [
+    {
+      "file": "path/relative/to/repo.py",
+      "summary": "One sentence: what changed here.",
+      "relation": "serves_intent"
+    }
+  ],
+  "manual_checks": [
+    {
+      "feature": "User-facing feature name inferred from the file paths.",
+      "files": ["path/relative/to/repo.tsx"],
+      "steps": "Open X, do Y, confirm Z."
+    }
+  ],
   "confidence": 0.0
 }
 ```
 
 `line` may be `null` when the defect is not attributable to a single line.
+`files` must contain one entry for every file in the diff. `manual_checks` may
+be an empty array; when not empty, every entry's `files` must be a non-empty
+subset of the diff's changed files.
