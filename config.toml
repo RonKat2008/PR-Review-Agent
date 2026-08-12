@@ -16,6 +16,32 @@ name = "prime-agent-review-demo"
 # instruction: never upload anything to those repos).
 read_only = false
 
+# --- Multi-repo targets (A5) -------------------------------------------------
+# One agent instance serves both target repos. [repo]/[review] above remain the
+# fallback used only when no [[repos]] entries exist (e.g. the demo config
+# above). Once [[repos]] is populated, pick the active entry per invocation
+# with `--repo <owner/name or bare name>` (case-insensitive); resolve_active()
+# rewrites [repo] and review.repo_root/graph_path onto a copy of Config from
+# the chosen entry, so the sweep itself never sees more than one repo.
+#
+# read_only = true on BOTH entries is the owner's standing instruction: never
+# upload anything to either repo. It is a hard write-ban the comment sink
+# honors regardless of dry_run (see RepoConfig.read_only in config.py).
+[[repos]]
+owner = "example-org"
+name = "service-a"
+read_only = true
+# TODO: set to a local checkout once cloned (see docs/FINAL-PLAN.md section 3).
+repo_root = ""
+graph_path = "graphs/service-a-cochange.json"
+
+[[repos]]
+owner = "example-org"
+name = "service-b"
+read_only = true
+repo_root = ""
+graph_path = "graphs/service-b-cochange.json"
+
 [schedule]
 # Cron expressions handed to `prime-agent schedule add`.
 open_prs = "0 */4 * * *"      # every 4 hours

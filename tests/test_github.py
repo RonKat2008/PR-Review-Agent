@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 
@@ -12,11 +13,13 @@ from prime_pr_review.github import (
     GitHubError,
     authenticated_login,
     fetch_diff,
+    get_pr,
     list_comments,
     list_merged_prs,
     list_open_prs,
     lookback_cutoff,
     post_comment,
+    single_pr_runner,
 )
 
 from .conftest import (
@@ -29,6 +32,33 @@ from .conftest import (
     make_pr,
     pr_list_json,
 )
+
+
+def is_pr_view(args: Sequence[str]) -> bool:
+    """Local to this file: `get_pr` is the only caller of `pr view`, and
+    conftest's shared predicates cover the calls every other test file needs
+    too."""
+    return args[0] == "pr" and args[1] == "view"
+
+
+def pr_view_json(pr) -> str:
+    """The single-object JSON shape `gh pr view --json <PR_FIELDS>` returns,
+    built from a PullRequest the same way conftest's `pr_list_json` builds an
+    array of them."""
+    return json.dumps(
+        {
+            "number": pr.number,
+            "title": pr.title,
+            "author": {"login": pr.author},
+            "headRefOid": pr.head_sha,
+            "baseRefName": pr.base_ref,
+            "url": pr.url,
+            "additions": pr.additions,
+            "deletions": pr.deletions,
+            "changedFiles": pr.changed_files,
+            "mergedAt": pr.merged_at,
+        }
+    )
 
 
 def _limit_value(args: Sequence[str]) -> str:
@@ -359,3 +389,104 @@ def test_merged_lane_escalated_call_still_avoids_the_search_index():
     escalated = " ".join(gh.calls[1][0])
     assert "--state merged" in escalated
     assert "--search" not in escalated
+
+
+def test_get_pr_requests_the_right_number_and_repo():
+    gh = FakeGh().on(is_pr_view, pr_view_json(make_pr(number=7)))
+
+    get_pr("acme/widget", 7, gh)
+
+    args = " ".join(gh.calls[0][0])
+    assert "pr view 7" in args
+    assert "--repo acme/widget" in args
+    assert f"--json {github.PR_FIELDS}" in args
+
+
+def test_get_pr_parses_the_returned_pull_request():
+    gh = FakeGh().on(is_pr_view, pr_view_json(make_pr(number=7, title="Fix thing")))
+
+    pr = get_pr("acme/widget", 7, gh)
+
+    assert pr.number == 7
+    assert pr.title == "Fix thing"
+
+
+def test_get_pr_raises_on_non_json_output():
+    gh = FakeGh().on(is_pr_view, "not json at all")
+
+    with pytest.raises(GitHubError, match="non-JSON"):
+        get_pr("acme/widget", 7, gh)
+
+
+def test_get_pr_raises_when_response_is_not_a_json_object():
+    gh = FakeGh().on(is_pr_view, "[1, 2, 3]")
+
+    with pytest.raises(GitHubError, match="JSON object"):
+        get_pr("acme/widget", 7, gh)
+
+
+def test_get_pr_raises_on_malformed_pr_payload():
+    gh = FakeGh().on(is_pr_view, '{"number": "not-a-number"}')
+
+    with pytest.raises(GitHubError, match="Malformed"):
+        get_pr("acme/widget", 7, gh)
+
+
+def test_get_pr_lets_a_missing_pr_error_flow_through_with_context():
+    """A missing/invalid PR: gh itself exits non-zero, and the runner already
+    turns that into a GitHubError -- get_pr must not swallow or reword it."""
+
+    def failing_runner(args: Sequence[str], stdin: str | None = None) -> str:
+        raise GitHubError(
+            "`gh pr view 999 --repo acme/widget` failed with exit code 1: "
+            "no pull requests found for branch"
+        )
+
+    with pytest.raises(GitHubError, match="no pull requests found"):
+        get_pr("acme/widget", 999, failing_runner)
+
+
+def test_single_pr_runner_answers_pr_list_without_touching_the_base_runner():
+    base = FakeGh()  # no handlers registered: proves the wrapper never delegates this call
+    wrapped = single_pr_runner(base, pr_list_json(make_pr(number=42)))
+
+    result = wrapped(["pr", "list", "--repo", "acme/widget", "--state", "open"])
+
+    assert json.loads(result)[0]["number"] == 42
+    assert base.calls == []
+
+
+def test_single_pr_runner_delegates_pr_diff_to_the_base_runner_untouched():
+    base = FakeGh().on(is_pr_diff, SAMPLE_DIFF)
+    wrapped = single_pr_runner(base, pr_list_json(make_pr(number=42)))
+
+    result = wrapped(["pr", "diff", "42", "--repo", "acme/widget"])
+
+    assert result == SAMPLE_DIFF
+    assert base.calls == [(["pr", "diff", "42", "--repo", "acme/widget"], None)]
+
+
+def test_single_pr_runner_delegates_stdin_through_to_the_base_runner():
+    base = FakeGh().on(is_pr_comment, "")
+    wrapped = single_pr_runner(base, pr_list_json(make_pr(number=42)))
+
+    wrapped(
+        ["pr", "comment", "42", "--repo", "acme/widget", "--body-file", "-"],
+        "body text",
+    )
+
+    assert base.calls == [
+        (["pr", "comment", "42", "--repo", "acme/widget", "--body-file", "-"], "body text")
+    ]
+
+
+def test_single_pr_runner_makes_list_open_prs_return_exactly_the_wrapped_pr():
+    """End-to-end proof against the actual seam sweep_lane's candidate
+    selection calls, not just the raw predicate match."""
+    base = FakeGh()
+    wrapped = single_pr_runner(base, pr_list_json(make_pr(number=99, title="Solo PR")))
+
+    prs = list_open_prs("acme/widget", wrapped)
+
+    assert [p.number for p in prs] == [99]
+    assert prs[0].title == "Solo PR"

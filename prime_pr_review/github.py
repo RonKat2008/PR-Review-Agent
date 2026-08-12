@@ -183,6 +183,65 @@ def _merged_since(pr: PullRequest, since: datetime) -> bool:
     return merged >= since
 
 
+def get_pr(
+    repo_slug: str,
+    number: int,
+    runner: GhRunner = default_runner,
+) -> PullRequest:
+    """A single pull request by number -- the `--pr N` entry point's seam.
+
+    A missing or invalid PR number is not special-cased: `gh pr view` already
+    exits non-zero for one, and the runner (`default_runner`, or a test double
+    behaving the same way) turns that into a `GitHubError` carrying gh's own
+    message. That failure is left to flow through unchanged rather than being
+    caught and re-wrapped here.
+    """
+    raw = runner(
+        ["pr", "view", str(number), "--repo", repo_slug, "--json", PR_FIELDS],
+        None,
+    )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GitHubError(f"`gh pr view` returned non-JSON output: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise GitHubError(
+            f"Expected a JSON object from `gh pr view`, got {type(payload).__name__}"
+        )
+    return _parse_pr(payload)
+
+
+def single_pr_runner(base_runner: GhRunner, pr_json: str) -> GhRunner:
+    """Wrap a runner so its `pr list` calls answer with one predetermined PR.
+
+    This is the seam the `--pr N` entry point (`scripts/run_sweep.py`) uses to
+    reuse `sweep_lane`'s per-PR machinery -- dedup against the watermark, diff
+    fetch, rendering, posting, idempotency -- without a second, parallel
+    implementation of any of it, and without sweep.py having to learn about
+    single-PR review at all. `sweep_lane`'s candidate selection always lists
+    (`list_open_prs` / `list_merged_prs`), and both go through exactly one
+    `pr list` call; intercepting that call and answering it with a one-element
+    JSON array makes the sweep believe it "listed" exactly the PR the caller
+    already resolved via `get_pr`. Every other call -- `pr diff`, `pr comment`,
+    the comments API, etc. -- is untouched and delegates straight to
+    `base_runner`, so everything downstream of candidate selection behaves
+    exactly as it would for a real listing.
+
+    `pr_json` must already be the full JSON array `gh pr list` would have
+    returned for this PR; this function does no reshaping of it, so a
+    malformed `pr_json` surfaces the same way a malformed real response would
+    -- via `_parse_pr_list` downstream.
+    """
+
+    def runner(args: Sequence[str], stdin: str | None = None) -> str:
+        if len(args) >= 2 and args[0] == "pr" and args[1] == "list":
+            return pr_json
+        return base_runner(args, stdin)
+
+    return runner
+
+
 def fetch_diff(repo_slug: str, number: int, runner: GhRunner = default_runner) -> str:
     """Unified diff for a single PR."""
     return runner(["pr", "diff", str(number), "--repo", repo_slug], None)

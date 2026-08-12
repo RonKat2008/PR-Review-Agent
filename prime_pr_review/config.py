@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 DEFAULT_CONFIG_PATH = Path("config.toml")
@@ -45,6 +45,22 @@ class RepoConfig:
     @property
     def slug(self) -> str:
         return f"{self.owner}/{self.name}"
+
+
+@dataclass(frozen=True)
+class RepoEntry:
+    """One `[[repos]]` entry: a target repo plus its per-repo overrides.
+
+    `resolve_active` turns exactly one entry into the active Config by
+    replacing `[repo]` and overriding `review.repo_root` / `review.graph_path`
+    with these values -- but only when they are non-empty (see
+    `resolve_active`), so an entry that leaves them blank does not blank out a
+    value the flat `[review]` block already had.
+    """
+
+    repo: RepoConfig
+    repo_root: str = ""
+    graph_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,6 +121,11 @@ class Config:
     schedule: ScheduleConfig
     review: ReviewConfig
     sinks: SinkConfig
+    # Multi-repo targets (A5). Empty when config.toml has no [[repos]] entries,
+    # in which case [repo] above is the whole story. `resolve_active` folds
+    # exactly one entry onto a copy of this Config, so sweep.py never has to
+    # know multi-repo config exists.
+    repos: tuple[RepoEntry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -134,6 +155,7 @@ def _build_config(raw: dict) -> Config:
     schedule = raw.get("schedule", {})
     review = raw.get("review", {})
     sinks = raw.get("sinks", {})
+    repos = raw.get("repos", [])
 
     return Config(
         repo=RepoConfig(
@@ -168,6 +190,19 @@ def _build_config(raw: dict) -> Config:
             webhook_kind=str(sinks.get("webhook_kind", "slack")),
             inline_comments=bool(sinks.get("inline_comments", True)),
         ),
+        repos=tuple(_build_repo_entry(entry) for entry in repos),
+    )
+
+
+def _build_repo_entry(raw: dict) -> RepoEntry:
+    return RepoEntry(
+        repo=RepoConfig(
+            owner=str(raw.get("owner", "")).strip(),
+            name=str(raw.get("name", "")).strip(),
+            read_only=bool(raw.get("read_only", False)),
+        ),
+        repo_root=str(raw.get("repo_root", "")).strip(),
+        graph_path=str(raw.get("graph_path", "")).strip(),
     )
 
 
@@ -195,9 +230,30 @@ def _validate(config: Config) -> None:
             f"sinks.webhook.kind must be one of {WEBHOOK_KINDS}, "
             f"got {config.sinks.webhook_kind!r}"
         )
+    problems.extend(_duplicate_repo_problems(config.repos))
 
     if problems:
         raise ConfigError("Invalid configuration:\n  - " + "\n  - ".join(problems))
+
+
+def _duplicate_repo_problems(repos: tuple[RepoEntry, ...]) -> list[str]:
+    """[[repos]] entries sharing an owner/name pair (case-insensitively) would
+    make `resolve_active` ambiguous by full slug -- reject at load time rather
+    than let selection silently pick whichever came first."""
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for entry in repos:
+        key = entry.repo.slug.lower()
+        if key in seen:
+            duplicates.add(entry.repo.slug)
+        seen.add(key)
+
+    if not duplicates:
+        return []
+    return [
+        "repos entries must have unique owner/name pairs; duplicated: "
+        + ", ".join(sorted(duplicates))
+    ]
 
 
 def require_repo(config: Config) -> RepoConfig:
@@ -207,6 +263,69 @@ def require_repo(config: Config) -> RepoConfig:
             "No target repository configured. Set [repo] owner and name in config.toml."
         )
     return config.repo
+
+
+def resolve_active(config: Config, selector: str = "") -> Config:
+    """Materialize a single-repo Config from `config.repos` for `selector`.
+
+    The rest of the system -- sweep_lane included -- only ever consumes a
+    single active `[repo]`. This picks one `[[repos]]` entry and folds it onto
+    a NEW Config via `dataclasses.replace`, so nothing downstream has to know
+    multi-repo config exists.
+
+    `selector` matches an entry's full `owner/name` slug or its bare `name`,
+    case-insensitively. Resolution rules:
+      - No `[[repos]]` entries at all: `config` is returned unchanged -- the
+        flat `[repo]` block is the whole story. A `selector` in this case is
+        an error, since there is nothing to select from.
+      - No selector, exactly one entry: that entry is used.
+      - No selector, more than one entry: ConfigError telling the caller to
+        pass `--repo`.
+      - A selector matching no entry: ConfigError listing the available
+        `owner/name` slugs.
+
+    `repo_root` / `graph_path` from the chosen entry override the equivalent
+    `review.*` fields only when the entry actually sets them (non-empty).
+    """
+    if not config.repos:
+        if selector:
+            raise ConfigError(
+                f"No [[repos]] entries configured; cannot select {selector!r}. "
+                "Add [[repos]] entries to config.toml, or omit --repo to use "
+                "the [repo] fallback."
+            )
+        return config
+
+    entry = _select_repo_entry(config.repos, selector)
+    return replace(
+        config,
+        repo=entry.repo,
+        review=replace(
+            config.review,
+            repo_root=entry.repo_root or config.review.repo_root,
+            graph_path=entry.graph_path or config.review.graph_path,
+        ),
+    )
+
+
+def _select_repo_entry(repos: tuple[RepoEntry, ...], selector: str) -> RepoEntry:
+    """Pick one entry from `repos`, applying the "no selector" rules."""
+    available = ", ".join(entry.repo.slug for entry in repos)
+
+    if not selector:
+        if len(repos) == 1:
+            return repos[0]
+        raise ConfigError(
+            f"Multiple [[repos]] entries configured ({available}); pass "
+            "--repo to choose one."
+        )
+
+    needle = selector.strip().lower()
+    for entry in repos:
+        if needle == entry.repo.slug.lower() or needle == entry.repo.name.lower():
+            return entry
+
+    raise ConfigError(f"Unknown repo {selector!r}. Available: {available}")
 
 
 def require_secrets(config: Config, env: dict[str, str] | None = None) -> Secrets:
