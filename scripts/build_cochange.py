@@ -271,6 +271,9 @@ def default_runner(repo: Path) -> GitRunner:
                 cwd=repo,
                 capture_output=True,
                 text=True,
+                # Locale-independent: file paths in git log are UTF-8.
+                encoding="utf-8",
+                errors="replace",
                 timeout=GIT_TIMEOUT_SECONDS,
                 check=False,
             )

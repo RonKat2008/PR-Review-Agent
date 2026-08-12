@@ -156,6 +156,9 @@ def default_git_runner(args: Sequence[str]) -> str:
             ["git", *args],
             capture_output=True,
             text=True,
+            # Locale-independent: git emits UTF-8; cp1252 would crash on real diffs.
+            encoding="utf-8",
+            errors="replace",
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
         )

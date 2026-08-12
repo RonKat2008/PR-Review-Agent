@@ -126,6 +126,9 @@ def default_analysis_runner(args: Sequence[str]) -> ToolRun:
             args,
             capture_output=True,
             text=True,
+            # Locale-independent: analyzer JSON is UTF-8; cp1252 would crash.
+            encoding="utf-8",
+            errors="replace",
             timeout=ANALYSIS_TIMEOUT_SECONDS,
             check=False,
         )

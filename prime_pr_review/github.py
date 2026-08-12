@@ -63,6 +63,12 @@ def default_runner(args: Sequence[str], stdin: str | None = None) -> str:
             input=stdin,
             capture_output=True,
             text=True,
+            # Explicit UTF-8: text=True alone uses the locale codepage (cp1252 on
+            # Windows), and a real PR diff with UTF-8 content crashes the reader.
+            # Found by a smoke test against the real target repo. errors="replace"
+            # because one lossy character beats losing the whole review.
+            encoding="utf-8",
+            errors="replace",
             timeout=GH_TIMEOUT_SECONDS,
             check=False,
         )
