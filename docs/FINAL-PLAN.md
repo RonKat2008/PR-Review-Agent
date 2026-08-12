@@ -106,7 +106,7 @@ local machine involved; a doc-only PR consumes ≤1 model call.
 
 | # | Task | Detail |
 |---|---|---|
-| E1 | Real-corpus eval | 20+ *merged* PRs from the actual target repos, replayed in dry-run. Read every review. This is the number that decides go-live — not the planted demo |
+| E1 | Real-corpus eval | 20+ *merged* PRs from the actual target repos, replayed in dry-run. Each run writes a consolidated markdown report to `reports/replay-{repo}-{date}.md` (per-PR verdicts + scorecard) for reading and archiving. This is the number that decides go-live — not the planted demo |
 | E2 | Threshold tuning | Set `min_confidence`, ensemble size, budgets from E1's observed precision |
 | E3 | Staged rollout | Backend repo first (Python = strongest graph support): dry-run 1 week → digest-only → inline comments on, `allow_request_changes` stays off → frontend repo repeats the ladder |
 | E4 | Docs close-out | README, GITHUB-ACTIONS.md, KNOWLEDGE-GRAPH.md reconciled to what shipped |

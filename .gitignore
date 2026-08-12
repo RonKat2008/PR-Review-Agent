@@ -26,9 +26,9 @@ build/
 .prime/sessions/
 .prime/logs/
 
-# Generated knowledge graphs of reviewed repos (contain their file paths;
-# derived artifacts, rebuilt from git history + CodeGraph on demand)
-graphs/
+# Knowledge graphs are TRACKED (owner's choice, for convenience): they contain
+# file paths of the reviewed private repos, so if this repo ever gets a remote,
+# it must be private.
 
 # Stray pytest capture files from subagent runs
 pytest_stdout.txt
