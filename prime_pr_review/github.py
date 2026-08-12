@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,12 @@ GhRunner = Callable[[Sequence[str], str | None], str]
 PR_FIELDS = (
     "number,title,author,headRefOid,baseRefName,url,additions,deletions,changedFiles,mergedAt"
 )
-DEFAULT_PAGE_LIMIT = 50
+DEFAULT_PAGE_LIMIT = 200
+# Upper bound on how many PRs a single sweep will ever request while escalating
+# --limit below. Bounds one sweep's listing work; if a repo still doesn't fit,
+# the head-SHA watermark makes re-listing on the next sweep cheap, so we return
+# what we have (with a warning) rather than requesting an unbounded number of PRs.
+HARD_CAP = 2000
 GH_TIMEOUT_SECONDS = 120
 
 
@@ -76,18 +82,23 @@ def list_open_prs(
     runner: GhRunner = default_runner,
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> tuple[PullRequest, ...]:
-    """Open PRs, newest first."""
-    raw = runner(
-        [
+    """Open PRs, newest first.
+
+    Escalates --limit and re-requests whenever a page comes back exactly as full
+    as requested, since a full page is the signature of possible truncation. See
+    `_list_prs_with_escalation`.
+    """
+
+    def build_args(page_limit: int) -> list[str]:
+        return [
             "pr", "list",
             "--repo", repo_slug,
             "--state", "open",
             "--json", PR_FIELDS,
-            "--limit", str(limit),
-        ],
-        None,
-    )
-    return _parse_pr_list(raw)
+            "--limit", str(page_limit),
+        ]
+
+    return _list_prs_with_escalation(repo_slug, build_args, runner, limit)
 
 
 def list_merged_prs(
@@ -104,18 +115,58 @@ def list_merged_prs(
     before a sweep would be invisible to it and, because the next sweep advances the
     watermark past it, could be missed permanently. The list API is immediately
     consistent.
+
+    The `since` filter is applied after limit escalation (see
+    `_list_prs_with_escalation`), so a truncated first page can never hide an
+    eligible PR from it.
     """
-    raw = runner(
-        [
+
+    def build_args(page_limit: int) -> list[str]:
+        return [
             "pr", "list",
             "--repo", repo_slug,
             "--state", "merged",
             "--json", PR_FIELDS,
-            "--limit", str(limit),
-        ],
-        None,
-    )
-    return tuple(pr for pr in _parse_pr_list(raw) if _merged_since(pr, since))
+            "--limit", str(page_limit),
+        ]
+
+    prs = _list_prs_with_escalation(repo_slug, build_args, runner, limit)
+    return tuple(pr for pr in prs if _merged_since(pr, since))
+
+
+def _list_prs_with_escalation(
+    repo_slug: str,
+    build_args: Callable[[int], list[str]],
+    runner: GhRunner,
+    limit: int,
+) -> tuple[PullRequest, ...]:
+    """Request a page of PRs, doubling `--limit` and re-requesting whenever the
+    page comes back exactly as full as requested — the signature of possible
+    truncation, since `gh pr list` never returns more than `--limit` asks for.
+
+    `gh pr list` paginates GraphQL internally up to whatever `--limit` it is
+    given, so escalating the limit is sufficient on its own; no manual pagination
+    is needed here. Escalation stops once a page comes back short (nothing left
+    to find) or `HARD_CAP` is reached. A page that is still full at `HARD_CAP` is
+    returned anyway — the head-SHA watermark makes re-listing on the next sweep
+    cheap — but is logged as a warning so a persistently truncated repo is visible
+    instead of silently dropping PRs.
+    """
+    requested = min(limit, HARD_CAP)
+    while True:
+        raw = runner(build_args(requested), None)
+        prs = _parse_pr_list(raw)
+        if len(prs) < requested:
+            return prs
+        if requested >= HARD_CAP:
+            warnings.warn(
+                f"gh pr list on {repo_slug!r} returned a full page of "
+                f"{len(prs)} at HARD_CAP ({HARD_CAP}); results may still be "
+                "truncated.",
+                stacklevel=2,
+            )
+            return prs
+        requested = min(requested * 2, HARD_CAP)
 
 
 def _merged_since(pr: PullRequest, since: datetime) -> bool:
