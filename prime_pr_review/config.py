@@ -32,6 +32,11 @@ class ConfigError(ValueError):
 class RepoConfig:
     owner: str
     name: str
+    # Hard write-ban for this repo: the comment sink is refused regardless of
+    # dry_run or any other setting. For repos the agent may read but must never
+    # post to (owner's standing instruction, e.g. example-org/service-a and
+    # example-org/service-b).
+    read_only: bool = False
 
     @property
     def is_set(self) -> bool:
@@ -130,6 +135,7 @@ def _build_config(raw: dict) -> Config:
         repo=RepoConfig(
             owner=str(repo.get("owner", "")).strip(),
             name=str(repo.get("name", "")).strip(),
+            read_only=bool(repo.get("read_only", False)),
         ),
         schedule=ScheduleConfig(
             open_prs=str(schedule.get("open_prs", "0 */4 * * *")),

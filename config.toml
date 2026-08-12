@@ -10,6 +10,11 @@
 # Swap to the real project once the reviews look trustworthy.
 owner = "RonKat2008"
 name = "prime-agent-review-demo"
+# Standing write-ban for the configured repo: reviews are still produced locally,
+# but the comment sink is refused no matter what dry_run says. MUST be true
+# whenever this points at example-org/service-a or example-org/service-b (owner's
+# instruction: never upload anything to those repos).
+read_only = false
 
 [schedule]
 # Cron expressions handed to `prime-agent schedule add`.

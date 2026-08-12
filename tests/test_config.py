@@ -58,6 +58,20 @@ def test_shipped_config_is_valid():
     assert config.review.dry_run is True, "shipped config must start in dry-run"
 
 
+def test_repo_read_only_parses_from_toml(tmp_path):
+    toml = '[repo]\nowner = "example-org"\nname = "service-a"\nread_only = true\n'
+
+    config = load_config(_write(tmp_path, toml))
+
+    assert config.repo.read_only is True
+
+
+def test_repo_read_only_defaults_to_false(tmp_path):
+    config = load_config(_write(tmp_path, MINIMAL_TOML))
+
+    assert config.repo.read_only is False
+
+
 def test_raises_when_config_file_missing(tmp_path):
     with pytest.raises(ConfigError, match="not found"):
         load_config(tmp_path / "nope.toml")

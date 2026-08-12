@@ -85,6 +85,31 @@ def test_silent_verdict_is_blocked():
     assert "empty" in decision.reason
 
 
+def test_read_only_repo_blocks_posting_even_when_dry_run_is_off():
+    """The standing write-ban on a repo must not be defeatable by flipping dry_run.
+
+    This encodes the owner's instruction that example-org/service-a and
+    example-org/service-b must never receive any upload from this system.
+    """
+    decision = evaluate_comment_gates(
+        make_config(read_only=True, dry_run=False), make_pr(), _verdict(), BUDGET, []
+    )
+
+    assert decision.allowed is False
+    assert "read-only" in decision.reason
+
+
+def test_read_only_repo_never_calls_github_even_to_list_comments():
+    gh = FakeGh()  # no handlers: ANY gh call would raise
+
+    outcome = post_pr_comment(
+        make_config(read_only=True, dry_run=False), make_pr(), _verdict(), "body", BUDGET, gh
+    )
+
+    assert outcome.posted is False
+    assert gh.calls == []
+
+
 def test_self_authored_pr_is_blocked():
     """Prevents the agent reviewing its own pull requests in a loop."""
     decision = evaluate_comment_gates(

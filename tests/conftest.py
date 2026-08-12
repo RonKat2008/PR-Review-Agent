@@ -58,6 +58,7 @@ def make_config(
     *,
     owner: str = "acme",
     name: str = "widget",
+    read_only: bool = False,
     dry_run: bool = False,
     min_confidence: float = 0.7,
     max_comments: int = 5,
@@ -73,7 +74,7 @@ def make_config(
     allow_request_changes: bool = False,
 ) -> Config:
     return Config(
-        repo=RepoConfig(owner=owner, name=name),
+        repo=RepoConfig(owner=owner, name=name, read_only=read_only),
         schedule=ScheduleConfig(open_prs="0 */4 * * *", merged_prs="0 9 * * 1-5"),
         review=ReviewConfig(
             dry_run=dry_run,

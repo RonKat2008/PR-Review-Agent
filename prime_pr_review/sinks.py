@@ -73,6 +73,11 @@ def evaluate_comment_gates(
     if not config.sinks.pr_comment:
         return GateDecision(False, "pr_comment sink disabled")
 
+    # Checked before dry_run on purpose: this is a standing write-ban on the repo
+    # itself, not a mode. Flipping dry_run must never be enough to post here.
+    if config.repo.read_only:
+        return GateDecision(False, f"repo {config.repo.slug} is configured read-only")
+
     if config.review.dry_run:
         return GateDecision(False, "dry_run enabled")
 
@@ -118,7 +123,9 @@ def post_pr_comment(
     repo_slug = config.repo.slug
 
     existing: Sequence[str] = ()
-    if config.sinks.pr_comment and not config.review.dry_run:
+    # A read-only repo can never be posted to, so don't spend an API call
+    # verifying idempotency for a comment that is already refused.
+    if config.sinks.pr_comment and not config.review.dry_run and not config.repo.read_only:
         try:
             existing = github.list_comments(repo_slug, pr.number, runner)
         except github.GitHubError as exc:
