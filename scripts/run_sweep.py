@@ -27,7 +27,11 @@ from prime_pr_review.config import (  # noqa: E402
 )
 from prime_pr_review.feedback import FeedbackError, load_rejections  # noqa: E402
 from prime_pr_review.graph import strict_runner  # noqa: E402
-from prime_pr_review.reviewers import gemini_model_fn, gemini_reviewer  # noqa: E402
+from prime_pr_review.reviewers import (  # noqa: E402
+    DEFAULT_GEMINI_MODEL,
+    gemini_model_fn,
+    gemini_reviewer,
+)
 from prime_pr_review.state import (  # noqa: E402
     LANE_MERGED,
     LANE_OPEN,
@@ -121,7 +125,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run a PR review sweep")
     parser.add_argument("--lane", choices=(LANE_OPEN, LANE_MERGED), default=LANE_OPEN)
     parser.add_argument("--config", default="config.toml")
-    parser.add_argument("--model", default="gemini-2.5-flash")
+    # The alias, not a pinned id: pinned Gemini versions get retired for new users
+    # (a retired default already cost one full sweep of 404s).
+    parser.add_argument("--model", default=DEFAULT_GEMINI_MODEL)
     parser.add_argument(
         "--repo",
         default="",

@@ -5,6 +5,49 @@ description: Review open and recently merged pull requests for bugs introduced a
 
 # PR Review Sweep
 
+## Driving it
+
+One console command wraps everything and works from any directory (installed by
+`pip install -e .` of this repo):
+
+```bash
+prime-review pr example-org/service-b 2567          # review exactly one PR
+prime-review sweep --repo service-b               # sweep the open lane
+prime-review replay --repo service-b --state open --count 10
+prime-review score                                # demo answer-key gate
+prime-review check                                # preflight
+```
+
+### From prime-agent
+
+prime-agent is the scheduler and operator shell; the pipeline itself always runs
+through `prime-review`. When this skill is loaded, execute reviews by shelling
+out — do NOT re-implement the review in the kernel:
+
+```python
+%%bash
+cd "M:/service-a/pr-review-agent"
+./.venv/Scripts/prime-review.exe pr example-org/service-b 2567
+```
+
+Headless one-shots and schedules:
+
+```bash
+prime-agent --skill "M:/service-a/pr-review-agent/skills/pr-review" -p \
+  "Using the pr-review skill, review PR 2567 of example-org/service-b"
+
+prime-agent schedule add worker "0 */4 * * *" -- \
+  "Using the pr-review skill, run: prime-review sweep --repo service-b"
+prime-agent schedule add worker "0 9 * * 1-5" -- \
+  "Using the pr-review skill, run: prime-review sweep --repo service-b --lane merged"
+```
+
+Note: the shelled commands use the project's OWN Gemini key from the
+environment/auth file — prime-agent's provider only has to understand the
+instruction, never to perform the review itself. Both example-org repos are
+configured `read_only = true`: reviews land in `reviews/` locally and never
+post to GitHub regardless of who drives.
+
 Automated bug review over a GitHub repository, in two lanes:
 
 - **`open`** — pre-merge gate. "What breaks if this merges?"
