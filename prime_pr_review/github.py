@@ -7,6 +7,9 @@ here is testable against recorded fixtures without a network or a token.
 from __future__ import annotations
 
 import json
+import re
+
+_ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[mK]')
 import shutil
 import subprocess
 import warnings
@@ -80,7 +83,7 @@ def default_runner(args: Sequence[str], stdin: str | None = None) -> str:
             f"`gh {' '.join(args)}` failed with exit code {result.returncode}: "
             f"{result.stderr.strip()}"
         )
-    return result.stdout
+    return _ANSI_ESCAPE.sub('', result.stdout)
 
 
 def list_open_prs(

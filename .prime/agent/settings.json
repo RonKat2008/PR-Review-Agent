@@ -1,3 +1,11 @@
 {
-  "shellPath": "C:\\Program Files\\Git\\bin\\bash.exe"
+  "shellPath": "C:\\Program Files\\Git\\bin\\bash.exe",
+  "skills": ["M:/service-a/pr-review-agent/skills/pr-review"],
+  "defaultProvider": "google",
+  "defaultModel": "gemini-flash-latest",
+  "retry": {
+    "provider": {
+      "maxRetries": 4
+    }
+  }
 }

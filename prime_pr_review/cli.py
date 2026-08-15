@@ -53,6 +53,10 @@ def _load(script: str):
     if spec is None or spec.loader is None:
         raise SystemExit(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
+    # Register before exec: stdlib dataclasses resolves cls.__module__ through
+    # sys.modules at class-creation time, and an unregistered module crashes any
+    # script that defines a module-level @dataclass (e.g. build_cochange).
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
