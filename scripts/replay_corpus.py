@@ -74,6 +74,10 @@ REVIEWS_DIR = AGENT_ROOT / "reviews"
 REJECTIONS_FILE = AGENT_ROOT / "state" / "rejections.json"
 DEFAULT_REPORTS_DIR = AGENT_ROOT / "reports"
 
+# Sentinel for `main(enrichment=...)`: tells "not supplied" apart from an
+# explicit None, so passing `enrichment=None` never triggers key resolution.
+_ENRICHMENT_UNSET: Enrichment = Enrichment()
+
 DEFAULT_COUNT = 20
 # Generous lookback for "the last --count merged PRs": wide enough that a
 # slow-moving repo still yields `count` results, trimmed client-side afterward.
@@ -499,7 +503,7 @@ def main(
     *,
     runner: github.GhRunner = github.default_runner,
     reviewer: Reviewer | None = None,
-    enrichment: Enrichment | None = None,
+    enrichment: Enrichment | None = _ENRICHMENT_UNSET,
     api_key_resolver: Callable[[], str] = resolve_api_key,
     reviews_dir: Path | str = REVIEWS_DIR,
 ) -> int:
@@ -510,7 +514,10 @@ def main(
 
     The API key is resolved -- and the real reviewer/enrichment built -- only
     when the caller did not already supply both, so a fully-stubbed test never
-    needs a real key, an auth file, or a network.
+    needs a real key, an auth file, or a network. `enrichment` distinguishes
+    "not supplied" (the `_ENRICHMENT_UNSET` sentinel default: build the real
+    one) from an explicit `None` (run with no enrichment at all) -- a caller
+    passing `enrichment=None` must not force a key resolution it never needs.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -556,11 +563,11 @@ def main(
         "DRY RUN (forced -- never posts)\n"
     )
 
-    if reviewer is None or enrichment is None:
+    if reviewer is None or enrichment is _ENRICHMENT_UNSET:
         api_key = api_key_resolver()
         if reviewer is None:
             reviewer = gemini_reviewer(api_key, model=args.model, prompts_dir=PROMPTS_DIR)
-        if enrichment is None:
+        if enrichment is _ENRICHMENT_UNSET:
             enrichment = build_enrichment(config, api_key, args.model)
 
     try:

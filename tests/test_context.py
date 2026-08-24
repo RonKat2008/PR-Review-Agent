@@ -434,3 +434,102 @@ def test_sibling_test_and_convention_dataclasses_are_frozen():
     sibling = SiblingTest(path="test_x.py", content="x")
     with pytest.raises(AttributeError):
         sibling.content = "y"  # type: ignore[misc]
+
+
+# --- budget packing skips oversized items ------------------------------------
+
+
+def test_fit_within_skips_an_oversized_item_and_keeps_smaller_ones_behind_it():
+    from prime_pr_review.context import _fit_within
+
+    big = ChangedFile(path="big.py", content="x" * 500)
+    small = ChangedFile(path="small.py", content="y" * 100)
+    selected, skipped = _fit_within([big, small], max_bytes=200)
+    assert selected == (small,)
+    assert skipped is True
+
+
+# --- hunk-window excerpts ----------------------------------------------------
+
+
+def _numbered_file(lines: int) -> str:
+    return "\n".join(f"line {i}" for i in range(1, lines + 1))
+
+
+def test_build_excerpt_windows_around_ranges_with_omission_markers():
+    from prime_pr_review.context import _build_excerpt
+
+    excerpt = _build_excerpt(_numbered_file(1000), ((500, 505),), context_lines=10)
+    assert excerpt is not None
+    assert "line 490" in excerpt and "line 515" in excerpt
+    assert "line 489" not in excerpt and "line 516" not in excerpt
+    assert "lines 1–489 omitted" in excerpt
+    assert "lines 516–1000 omitted" in excerpt
+    assert "26 of 1000 lines" in excerpt  # 490..515 inclusive
+
+
+def test_build_excerpt_merges_overlapping_windows():
+    from prime_pr_review.context import _build_excerpt
+
+    excerpt = _build_excerpt(_numbered_file(300), ((100, 102), (110, 112)), context_lines=20)
+    assert excerpt.count("omitted) ⋯") == 2  # only before and after, never between
+
+
+def test_build_excerpt_returns_none_without_ranges():
+    from prime_pr_review.context import _build_excerpt
+
+    assert _build_excerpt(_numbered_file(50), ()) is None
+
+
+def test_gather_changed_files_degrades_an_oversized_file_to_an_excerpt():
+    from prime_pr_review.context import _gather_changed_files
+
+    content = _numbered_file(2000)
+    encoded = base64.b64encode(content.encode()).decode()
+
+    def runner(args, stdin=None):
+        return encoded
+
+    files, note = _gather_changed_files(
+        REPO_SLUG, HEAD_SHA, ("big.py",), runner,
+        budget=len(content) // 4,
+        ranges_by_path={"big.py": ((1000, 1010),)},
+    )
+    assert len(files) == 1
+    assert files[0].excerpted is True
+    assert "line 1005" in files[0].content
+    assert note == "changed files: 0 full, 1 excerpted, 0 omitted (budget)"
+
+
+def test_gather_changed_files_keeps_a_fitting_file_whole_with_no_note():
+    from prime_pr_review.context import _gather_changed_files
+
+    content = _numbered_file(10)
+    encoded = base64.b64encode(content.encode()).decode()
+    files, note = _gather_changed_files(
+        REPO_SLUG, HEAD_SHA, ("small.py",), runner=lambda a, s=None: encoded,
+        budget=10_000, ranges_by_path={"small.py": ((1, 2),)},
+    )
+    assert files[0].excerpted is False
+    assert files[0].content == content
+    assert note == ""
+
+
+def test_gather_changed_files_omits_only_when_even_the_excerpt_cannot_fit():
+    from prime_pr_review.context import _gather_changed_files
+
+    content = _numbered_file(2000)
+    encoded = base64.b64encode(content.encode()).decode()
+    files, note = _gather_changed_files(
+        REPO_SLUG, HEAD_SHA, ("big.py",), runner=lambda a, s=None: encoded,
+        budget=10, ranges_by_path={"big.py": ((1000, 1010),)},
+    )
+    assert files == ()
+    assert note == "changed files: 0 full, 0 excerpted, 1 omitted (budget)"
+
+
+def test_render_marks_excerpted_files_in_the_heading():
+    context = ReviewContext(
+        changed_files=(ChangedFile(path="big.py", content="...", excerpted=True),)
+    )
+    assert "#### `big.py` (excerpt)" in context.render()

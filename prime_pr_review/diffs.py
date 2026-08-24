@@ -7,6 +7,7 @@ token cost and produce nothing but false positives.
 from __future__ import annotations
 
 import fnmatch
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -58,6 +59,28 @@ def split_by_file(diff: str) -> tuple[FileDiff, ...]:
         chunks.append(FileDiff(path=current_path, body="".join(current)))
 
     return tuple(chunks)
+
+
+# `@@ -a,b +c,d @@`: the new-file side starts at line c and spans d lines
+# (d omitted means 1). Only the +c[,d] side matters for excerpting: excerpts are
+# cut from the file content at the PR head, which is the new side.
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+
+
+def hunk_ranges(body: str) -> tuple[tuple[int, int], ...]:
+    """New-file (start, end) line ranges of every hunk in one file's diff body.
+
+    1-based and inclusive, in the order the hunks appear. A hunk that deletes
+    without adding (`+c,0`) still yields `(c, c)` — the deletion site is where
+    surrounding context matters. Malformed headers simply do not match and are
+    skipped; an empty or hunk-less body yields `()`.
+    """
+    ranges: list[tuple[int, int]] = []
+    for match in _HUNK_HEADER.finditer(body):
+        start = int(match.group(1))
+        count = int(match.group(2)) if match.group(2) is not None else 1
+        ranges.append((start, start + max(count, 1) - 1))
+    return tuple(ranges)
 
 
 def filter_diff(

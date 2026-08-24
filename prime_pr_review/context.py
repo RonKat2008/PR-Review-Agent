@@ -27,7 +27,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .diffs import split_by_file
+from .diffs import hunk_ranges, split_by_file
 from .github import GhRunner, GitHubError
 from .github import default_runner as default_gh_runner
 
@@ -39,6 +39,10 @@ FULL_FILES_SHARE = 0.40
 CALL_SITES_SHARE = 0.25
 SIBLING_TESTS_SHARE = 0.20
 CONVENTIONS_SHARE = 0.15
+
+# Lines of surrounding code kept on each side of a changed hunk when a full
+# changed file does not fit its budget share and degrades to an excerpt.
+EXCERPT_CONTEXT_LINES = 80
 
 GIT_TIMEOUT_SECONDS = 30
 GIT_NO_MATCHES_EXIT_CODE = 1
@@ -69,10 +73,15 @@ class GitError(RuntimeError):
 
 @dataclass(frozen=True)
 class ChangedFile:
-    """Full content of one changed file, read at the PR head SHA."""
+    """Content of one changed file, read at the PR head SHA.
+
+    `excerpted` marks content reduced to windows around the PR's changed hunks
+    because the full file did not fit its budget share — the reader (and the
+    prompt) must know it is not seeing the whole file."""
 
     path: str
     content: str
+    excerpted: bool = False
 
     @property
     def size(self) -> int:
@@ -184,10 +193,13 @@ def gather_context(
 ) -> ReviewContext:
     """Collect everything outside the diff that the review needs for one PR."""
     root = Path(repo_root)
-    diff_paths = tuple(f.path for f in split_by_file(diff))
+    file_diffs = split_by_file(diff)
+    diff_paths = tuple(f.path for f in file_diffs)
+    ranges_by_path = {f.path: hunk_ranges(f.body) for f in file_diffs}
 
     changed_files, dropped_files = _gather_changed_files(
-        repo_slug, head_sha, diff_paths, gh_runner, _budget(max_bytes, FULL_FILES_SHARE)
+        repo_slug, head_sha, diff_paths, gh_runner,
+        _budget(max_bytes, FULL_FILES_SHARE), ranges_by_path,
     )
     call_sites, dropped_calls = _gather_call_sites(
         diff, diff_paths, git_runner, _budget(max_bytes, CALL_SITES_SHARE)
@@ -219,18 +231,24 @@ def _budget(max_bytes: int, share: float) -> int:
 
 
 def _fit_within(items: Sequence, max_bytes: int) -> tuple[tuple, bool]:
-    """Take items in order until the byte budget is spent. Never splits an item.
+    """Pack items in order, SKIPPING any that don't fit the remaining budget.
 
-    Mirrors `diffs._fit_within`, generalized to any item exposing `.size`.
+    Unlike `diffs._fit_within` (which stops at the first oversized file because
+    the diff's truncation notice marks everything after the cut), one oversized
+    item here must not shut out every smaller item behind it — each section's
+    items are independent pieces of evidence, not a contiguous document.
+    Never splits an item. The bool reports whether anything was skipped.
     """
     selected: list = []
     used = 0
+    skipped = False
     for item in items:
         if used + item.size > max_bytes:
-            return tuple(selected), True
+            skipped = True
+            continue
         selected.append(item)
         used += item.size
-    return tuple(selected), False
+    return tuple(selected), skipped
 
 
 # --- Full changed files -----------------------------------------------------
@@ -242,15 +260,91 @@ def _gather_changed_files(
     paths: Sequence[str],
     runner: GhRunner,
     budget: int,
+    ranges_by_path: dict[str, tuple[tuple[int, int], ...]] | None = None,
 ) -> tuple[tuple[ChangedFile, ...], str]:
+    """Per file: include it whole if it fits the remaining budget, degrade to a
+    hunk-window excerpt if not, and only omit when even the excerpt won't fit.
+
+    A 3,000-line file used to be all-or-nothing — and "nothing" also starved
+    every file behind it, because the packer stopped at the first oversized
+    item. Excerpting keeps the code that actually interacts with the change
+    (the windows around each hunk) at a fraction of the bytes.
+    """
+    ranges_by_path = ranges_by_path or {}
     fetched = [
         ChangedFile(path=path, content=content)
         for path in paths
         for content in (_fetch_file_content(repo_slug, head_sha, path, runner),)
         if content is not None
     ]
-    selected, truncated = _fit_within(fetched, budget)
-    return selected, _drop_note("changed files", fetched, selected, truncated)
+
+    selected: list[ChangedFile] = []
+    used = 0
+    excerpted = 0
+    omitted = 0
+    for file in fetched:
+        if used + file.size <= budget:
+            selected.append(file)
+            used += file.size
+            continue
+        excerpt = _build_excerpt(file.content, ranges_by_path.get(file.path, ()))
+        if excerpt is not None:
+            candidate = ChangedFile(path=file.path, content=excerpt, excerpted=True)
+            if used + candidate.size <= budget:
+                selected.append(candidate)
+                used += candidate.size
+                excerpted += 1
+                continue
+        omitted += 1
+
+    note = ""
+    if excerpted or omitted:
+        full = len(selected) - excerpted
+        note = (
+            f"changed files: {full} full, {excerpted} excerpted, "
+            f"{omitted} omitted (budget)"
+        )
+    return tuple(selected), note
+
+
+def _build_excerpt(
+    content: str,
+    ranges: tuple[tuple[int, int], ...],
+    context_lines: int = EXCERPT_CONTEXT_LINES,
+) -> str | None:
+    """Windows of ±`context_lines` around each changed range, merged when they
+    touch, joined with explicit omission markers. `None` when there are no
+    ranges to anchor on — an excerpt of nothing would be pure noise."""
+    if not ranges:
+        return None
+    lines = content.splitlines()
+    total = len(lines)
+    if total == 0:
+        return None
+
+    windows: list[list[int]] = []
+    for start, end in sorted(ranges):
+        lo = max(1, start - context_lines)
+        hi = min(total, end + context_lines)
+        if windows and lo <= windows[-1][1] + 1:
+            windows[-1][1] = max(windows[-1][1], hi)
+        else:
+            windows.append([lo, hi])
+
+    shown = sum(hi - lo + 1 for lo, hi in windows)
+    parts = [
+        f"[excerpt: {shown} of {total} lines — windows around this PR's "
+        f"changed hunks; unshown code omitted]"
+    ]
+    previous_end = 0
+    for lo, hi in windows:
+        if lo > previous_end + 1:
+            parts.append(f"⋯ (lines {previous_end + 1}–{lo - 1} omitted) ⋯")
+        parts.append("\n".join(lines[lo - 1 : hi]))
+        previous_end = hi
+    if previous_end < total:
+        parts.append(f"⋯ (lines {previous_end + 1}–{total} omitted) ⋯")
+    return "\n".join(parts)
 
 
 def _fetch_file_content(
@@ -414,7 +508,8 @@ def _render_blob_section(title: str, items: Sequence) -> str:
         lines.append("_None found._")
     else:
         for item in items:
-            lines.append(f"#### `{item.path}`")
+            marker = " (excerpt)" if getattr(item, "excerpted", False) else ""
+            lines.append(f"#### `{item.path}`{marker}")
             lines.append("```")
             lines.append(item.content)
             lines.append("```")

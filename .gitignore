@@ -39,3 +39,6 @@ Thumbs.db
 .DS_Store
 # Windows artifact from a stray `2>nul` redirect in a shell command
 nul
+
+# Subagent verdict/payload handoff files (runtime)
+state/verdicts/

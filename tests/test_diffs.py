@@ -93,3 +93,37 @@ def test_malformed_header_falls_back_to_the_raw_remainder():
     files = split_by_file(diff)
 
     assert files[0].path == "nonsense-header"
+
+
+# --- hunk_ranges -------------------------------------------------------------
+
+
+def test_hunk_ranges_parses_every_hunk_in_order():
+    from prime_pr_review.diffs import hunk_ranges
+
+    body = (
+        "diff --git a/x.py b/x.py\n"
+        "--- a/x.py\n+++ b/x.py\n"
+        "@@ -10,3 +12,5 @@ def f():\n context\n"
+        "@@ -100,2 +200,10 @@\n context\n"
+    )
+    assert hunk_ranges(body) == ((12, 16), (200, 209))
+
+
+def test_hunk_ranges_defaults_an_omitted_count_to_one_line():
+    from prime_pr_review.diffs import hunk_ranges
+
+    assert hunk_ranges("@@ -3 +7 @@\n") == ((7, 7),)
+
+
+def test_hunk_ranges_keeps_a_pure_deletion_site_as_a_single_line_anchor():
+    from prime_pr_review.diffs import hunk_ranges
+
+    assert hunk_ranges("@@ -5,4 +5,0 @@\n") == ((5, 5),)
+
+
+def test_hunk_ranges_is_empty_for_a_body_with_no_hunks():
+    from prime_pr_review.diffs import hunk_ranges
+
+    assert hunk_ranges("") == ()
+    assert hunk_ranges("diff --git a/x b/x\nBinary files differ\n") == ()

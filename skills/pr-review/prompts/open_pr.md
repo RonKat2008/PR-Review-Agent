@@ -34,8 +34,14 @@ reviewer worth muting:
 
 ## Calibration
 
-**Precision over recall.** This posts publicly on a real PR. One confident wrong
-finding costs more trust than ten missed subtle bugs. When torn, omit.
+**Recall over silence.** These reviews are written to local files read by one
+maintainer — they are never posted on the PR. A missed real bug costs far more
+here than a finding that turns out benign. Report everything you can ground in
+the diff or the provided evidence: certain defects at their true severity, and
+plausible-but-unproven suspicions at MEDIUM or LOW with the uncertainty stated
+plainly in `evidence`. Do NOT manufacture findings on clean code — honesty about
+a clean diff is still the correct answer — but when torn between reporting and
+omitting a grounded concern, report it.
 
 Set `confidence` to your probability that *at least one* reported finding is a real
 defect a maintainer would act on:
@@ -103,7 +109,9 @@ Return **only** this JSON object. No prose before or after, no code fence.
       "line": 42,
       "severity": "HIGH",
       "claim": "One sentence: what is wrong.",
-      "evidence": "Why it is wrong, referencing the specific changed lines."
+      "evidence": "Why it is wrong, referencing the specific changed lines.",
+      "suggestion": "the exact replacement source line(s), when a clean drop-in fix exists",
+      "line_end": 44
     }
   ],
   "fixes": [
@@ -131,6 +139,14 @@ Return **only** this JSON object. No prose before or after, no code fence.
 ```
 
 `line` may be `null` when the defect is not attributable to a single line.
+
+`suggestion`: include one for EVERY finding where you can write a concrete fix —
+the exact source lines that should replace lines `line` through `line_end` (or
+just `line` when `line_end` is omitted). No diff markers, no code fences, no
+commentary, no elided code. When the full fix needs changes elsewhere too
+(another file, a new import), still provide the local replacement lines and name
+the additional changes in `evidence`. Omit the field only when no meaningful
+code-level fix can be written at the flagged location.
 `files` must contain one entry for every file in the diff. `manual_checks` may
 be an empty array; when not empty, every entry's `files` must be a non-empty
 subset of the diff's changed files.

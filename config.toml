@@ -34,14 +34,14 @@ read_only = true
 # Local checkout. Note: git-grep-based call sites read the working tree, which
 # may sit on a feature branch; the graph freshness check uses origin/<base>
 # and is unaffected.
-repo_root = "M:/service-a/service-a"
+repo_root = "/home/user/Projects/service-a"
 graph_path = "graphs/service-a-cochange.json"
 
 [[repos]]
 owner = "example-org"
 name = "service-b"
 read_only = true
-repo_root = "M:/service-a/service-b"
+repo_root = "/home/user/Projects/service-b"
 graph_path = "graphs/service-b-cochange.json"
 
 [schedule]
@@ -106,6 +106,22 @@ max_context_bytes = 400000
 #   graphs/service-b-cochange.json  - example-org/service-b @ origin/main
 # Empty = no graph; a stale graph is refused with a note, never trusted.
 graph_path = ""
+
+# --- Ensemble agreement (P2) ------------------------------------------------
+# 3 independent review runs per PR on three different model families, and
+# confidence becomes the observed agreement ratio instead of the model's
+# self-report (which pinned at 95% on every PR with a single run).
+#
+# min_agreement = 1 (RECALL MODE): every finding any seat reports is kept,
+# tagged with its agreement ("1/3 reviewers"). Measured on service-b #2700:
+# the three seats found four plausible MEDIUM bugs in four different files,
+# and min_agreement = 2 dropped ALL of them as "Clean". While both target repos
+# are read_only and reviews are local-only, recall is the right trade; raise
+# to 2 before ever posting publicly, or better, add the refutation pass (P14)
+# as the precision gate instead of requiring finders to agree.
+# Cost lever: ensemble_size = 1 for cheap single-call reviews.
+ensemble_size = 3
+min_agreement = 1
 
 # --- Intent alignment (P8) --------------------------------------------------
 # Two-pass check: does the diff do what the PR says it does? Pass 1 derives the
