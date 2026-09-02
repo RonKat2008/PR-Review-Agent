@@ -27,9 +27,16 @@ of dry_run or who drives. Do not change that setting.
 | Ensemble seat 2 | `prime-inference/qwen/qwen3.8-max` |
 | Ensemble seat 3 | `prime-inference/z-ai/glm-5.2` |
 | Intent + blast passes | `prime-inference/deepseek/deepseek-v4-flash` |
+| Skeptic (P14) + judge-merge (P15) | `prime-inference/deepseek/deepseek-v4-pro` |
 
-Three different labs vote on every PR; a finding must survive 2-of-3 agreement
-(`ensemble_size`/`min_agreement` in config.toml). Typical cost: ~$0.25/PR.
+Three different labs vote on every PR, deliberately blind to each other —
+independence is what makes cross-seat agreement a usable confidence signal.
+The model-to-model communication happens in the two SEQUENTIAL passes instead:
+the judge clusters same-file findings that describe one defect (so agreement
+is counted right), and the skeptic tries to refute each surviving finding with
+concrete grounds (the precision gate that makes recall mode safe). Both run at
+seat tier — judge ≥ generator, never below — on the cheapest seat model.
+Typical cost: ~$0.25–0.50/PR.
 
 ## One-time kernel setup
 
@@ -52,9 +59,13 @@ start dying with "Daemon worker client closed" — upstream bug). Reset it first
 
 ```bash
 prime-agent shutdown --force
+sleep 15   # let worker teardown finish — launching into a stopping worker
+           # dies in seconds with "Session worker is stopping" (exit 13)
 ```
 
-A fresh daemon starts automatically on the next invocation. Run long reviews
+A fresh daemon starts automatically on the next invocation. If a run still
+exits 13 immediately, wait ~15s and relaunch — it is the startup race, not
+your prompt. Run long reviews
 under `caffeinate -i` so the Mac cannot sleep mid-review.
 
 ## The recipe
@@ -87,6 +98,10 @@ ENSEMBLE_SEATS = [
     "prime-inference/z-ai/glm-5.2",
 ]
 AUX_MODEL = "prime-inference/deepseek/deepseek-v4-flash"
+# Seat-tier on purpose (judge >= generator): both adversarial passes judge the
+# seats' output, so they must not run on a weaker model than the seats did.
+SKEPTIC_MODEL = "prime-inference/deepseek/deepseek-v4-pro"
+JUDGE_MODEL = "prime-inference/deepseek/deepseek-v4-pro"
 REPO_ROOT = ""  # set by run_sweep; told to every child so it never hunts for the checkout
 
 # The kernel loop. sweep_lane is synchronous and runs on a worker thread
@@ -185,6 +200,14 @@ def reviewer(pr, payload, lane):
 def model_fn(prompt):
     return _spawn_and_wait(prompt, f"pass-{uuid.uuid4().hex[:6]}", AUX_MODEL)
 
+# The two adversarial passes. Sequential by design: each runs AFTER the seats
+# are done, so there is nothing left for the seats to anchor on.
+def skeptic_fn(prompt):
+    return _spawn_and_wait(prompt, f"skeptic-{uuid.uuid4().hex[:6]}", SKEPTIC_MODEL)
+
+def judge_fn(prompt):
+    return _spawn_and_wait(prompt, f"judge-{uuid.uuid4().hex[:6]}", JUDGE_MODEL)
+
 def build_enrichment(config):
     root = Path(config.review.repo_root)
     return Enrichment(
@@ -196,6 +219,8 @@ def build_enrichment(config):
         git_runner=strict_runner(root),
         analysis_fn=run_analysis,
         rejections=load_rejections(AGENT / "state" / "rejections.json"),
+        skeptic_fn=skeptic_fn,
+        judge_fn=judge_fn,
     )
 
 async def run_sweep(repo_selector, lane=LANE_OPEN, runner=github.default_runner):

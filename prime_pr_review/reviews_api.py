@@ -181,7 +181,12 @@ def review_event_for(verdict: Verdict, allow_request_changes: bool) -> str:
     REQUEST_CHANGES when the caller has explicitly opted in. Blocking someone's
     merge automatically is a strong action and must not be the default.
     """
-    is_critical = any(finding.severity is Severity.CRITICAL for finding in verdict.introduces)
+    # A refuted CRITICAL cannot block: the skeptic challenged its premise, and
+    # REQUEST_CHANGES on a disputed claim would gate a colleague's merge on it.
+    is_critical = any(
+        finding.severity is Severity.CRITICAL and not finding.refuted
+        for finding in verdict.introduces
+    )
     has_broken_caller = bool(verdict.broken_callers)
     if (is_critical or has_broken_caller) and allow_request_changes:
         return EVENT_REQUEST_CHANGES

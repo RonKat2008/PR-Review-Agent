@@ -52,10 +52,15 @@ merged_prs = "0 9 * * 1-5"    # weekday mornings at 09:00
 [review]
 # SAFETY: while true, reviews are written locally and pushed to the webhook,
 # but NOT posted as PR comments. Flip to false when you trust the output.
+# Flipped back to true after the live demo-repo posting run: reviews stay in
+# the local md files by default (owner's preference); flip per-run when a live
+# posting demo is wanted.
 dry_run = true
 
 # Findings below this confidence are recorded locally but never posted.
-min_confidence = 0.7
+# 0.3 for the live demo repo: recall-mode agreement of 1/3 seats is 0.33,
+# and a grounded single-seat finding should still post there.
+min_confidence = 0.3
 
 # Hard cap on comments per sweep, so a bad prompt cannot spray the repo.
 max_comments_per_sweep = 5
@@ -123,6 +128,22 @@ graph_path = ""
 ensemble_size = 3
 min_agreement = 1
 
+# --- Skeptic pass (P14) -------------------------------------------------------
+# After the ensemble merges, a dedicated adversary model tries to DISPROVE each
+# finding with concrete grounds. Refuted findings are annotated (folded into a
+# "challenged" section of the review, excluded from inline comments, blocking
+# status, and suggestion blocks) — never dropped. This is the precision gate
+# that makes recall mode (min_agreement = 1 above) safe: precision comes from
+# an adversary, not from finders happening to agree.
+check_refute = true
+
+# --- Judge-merge pass (P15) ---------------------------------------------------
+# Before agreement is counted, a judge model clusters same-file findings that
+# describe the same defect (seats report one bug at different lines/severities,
+# and the deterministic line-bucket match misses those). Merge-only,
+# same-file-only, falls back to deterministic grouping on any failure.
+judge_merge = true
+
 # --- Intent alignment (P8) --------------------------------------------------
 # Two-pass check: does the diff do what the PR says it does? Pass 1 derives the
 # intent from title/body/commits with the diff withheld; pass 2 judges the diff
@@ -135,8 +156,19 @@ webhook = false         # no webhook URL configured yet
 local_file = true       # always on; the audit trail
 webhook_kind = "slack"  # slack | discord | generic
 
+# Public OSS target for evaluation. READ-ONLY IS NON-NEGOTIABLE: this agent
+# must never post on a project that has not invited it. Reviews land in
+# reviews/ locally, exactly like the example-org targets.
+[[repos]]
+owner = "django"
+name = "django"
+read_only = true
+repo_root = "/home/user/Projects/django"
+graph_path = "graphs/django-cochange.json"
+
 # The demo/answer-key repo, kept selectable for scorer runs: --repo prime-agent-review-demo
 [[repos]]
 owner = "RonKat2008"
 name = "prime-agent-review-demo"
 read_only = false
+repo_root = "/home/user/Projects/prime-agent-review-demo"

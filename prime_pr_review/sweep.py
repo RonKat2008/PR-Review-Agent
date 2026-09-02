@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import ci as ci_mod
@@ -22,18 +22,17 @@ from . import github
 from . import graph as graph_mod
 from .analysis import AnalysisResult
 from .blast import analyze_blast_radius, extract_changed_symbols
+from .config import Config
 from .context import GitRunner
-from .diffs import split_by_file
-from .ensemble import ensemble_review
+from .diffs import filter_diff, split_by_file
+from .ensemble import ensemble_review_detailed
 from .feedback import Rejection, filter_rejected, render_rejection_guidance
-from .reviews_api import commentable_lines
-from .config import Config, Secrets
-from .diffs import filter_diff
 from .github import PullRequest
 from .intent import IntentError, run_intent_check
+from .refute import refute_findings
 from .review import Verdict, VerdictError, parse_verdict
-from .template import render_review
-from .sinks import CommentBudget, DEFAULT_REVIEWS_DIR, post_pr_comment, write_local
+from .reviews_api import commentable_lines
+from .sinks import DEFAULT_REVIEWS_DIR, CommentBudget, post_pr_comment, write_local
 from .state import (
     LANE_MERGED,
     LANE_OPEN,
@@ -42,6 +41,7 @@ from .state import (
     mark_reviewed,
     set_merged_cursor,
 )
+from .template import render_review
 
 # (pull_request, review_payload, lane) -> raw verdict JSON text.
 # The payload is the filtered diff plus any gathered repository context, so the
@@ -81,6 +81,11 @@ class Enrichment:
     # or dismissal reply. Injected as prompt guidance AND enforced as a
     # post-verdict filter; suppressions are recorded on the outcome, never silent.
     rejections: tuple[Rejection, ...] = ()
+    # Skeptic (P14) and judge-merge (P15) models. Both default to `model_fn`
+    # when unset, so a caller that only wires one model still gets the passes;
+    # the skill wires seat-tier models here (judge >= generator, never below).
+    skeptic_fn: ModelFn | None = None
+    judge_fn: ModelFn | None = None
 
 
 @dataclass(frozen=True)
@@ -166,7 +171,7 @@ def sweep_lane(
 
     if lane == LANE_MERGED:
         working_state = set_merged_cursor(
-            working_state, (now or datetime.now(timezone.utc)).isoformat()
+            working_state, (now or datetime.now(UTC)).isoformat()
         )
 
     return _build_report(lane, len(candidates), tuple(outcomes)), working_state
@@ -200,11 +205,14 @@ def _review_one(
 
     try:
         if config.review.ensemble_size > 1:
-            verdict = ensemble_review(
+            verdict, ensemble_notes = ensemble_review_detailed(
                 pr, payload, lane, reviewer,
                 size=config.review.ensemble_size,
                 min_agreement=config.review.min_agreement,
+                judge_fn=_judge_fn(config, enrichment),
+                prompts_dir=enrichment.prompts_dir if enrichment else DEFAULT_PROMPTS_DIR,
             )
+            notes += ensemble_notes
         else:
             verdict = parse_verdict(reviewer(pr, payload, lane))
     except VerdictError as exc:
@@ -220,6 +228,11 @@ def _review_one(
 
     verdict, suppression_notes = _apply_feedback(verdict, enrichment)
     notes += suppression_notes
+
+    # After feedback suppression on purpose: no skeptic tokens are spent on a
+    # finding a maintainer already rejected.
+    verdict, refute_notes = _apply_refutation(config, filtered.text, verdict, enrichment)
+    notes += refute_notes
 
     body = render_review(pr, verdict, lane)
     local_path = (
@@ -391,6 +404,41 @@ def _graph_section(
     # warned twice" must be distinguishable per PR in the scorecard.
     note = f"graph: {warnings} co-change warning(s), {callers} caller edge(s) injected"
     return graph_mod.render(graph, diff_files, symbol_ids), (note,)
+
+
+def _judge_fn(config: Config, enrichment: Enrichment | None) -> ModelFn | None:
+    """The model behind the P15 judge-merge pass, or None when it must not run."""
+    if enrichment is None or not config.review.judge_merge:
+        return None
+    return enrichment.judge_fn or enrichment.model_fn
+
+
+def _apply_refutation(
+    config: Config,
+    diff: str,
+    verdict: Verdict,
+    enrichment: Enrichment | None,
+) -> tuple[Verdict, tuple[str, ...]]:
+    """Run the skeptic pass (P14) over the surviving findings.
+
+    Refuted findings stay in the verdict, annotated — the sinks and blocking
+    logic downstream treat them as challenged, never as gone. The pass itself
+    degrades like every other enrichment: a failure is a note, not an error.
+    """
+    if enrichment is None or not config.review.check_refute or not verdict.introduces:
+        return verdict, ()
+    model_fn = enrichment.skeptic_fn or enrichment.model_fn
+    if model_fn is None:
+        return verdict, ()
+
+    try:
+        findings, notes = refute_findings(
+            verdict.introduces, diff, model_fn, enrichment.prompts_dir
+        )
+    except Exception as exc:  # noqa: BLE001 - degrade, never fail the review
+        return verdict, (f"skeptic pass failed: {exc}",)
+
+    return replace(verdict, introduces=findings), notes
 
 
 def _apply_feedback(

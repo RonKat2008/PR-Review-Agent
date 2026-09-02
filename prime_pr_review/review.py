@@ -60,6 +60,12 @@ class Finding:
     # Corroborating static-analysis rule, e.g. "bandit:B608". Raises trust and
     # lets the reader verify without taking the model's word for it.
     corroboration: str = ""
+    # Set by the skeptic pass (P14), never by the reviewer itself. A refuted
+    # finding stays in the verdict — the local review shows the challenge and
+    # the reader adjudicates — but it no longer counts as blocking, never
+    # posts as an inline comment, and its suggestion is not proposed.
+    refuted: bool = False
+    refutation: str = ""
 
     @property
     def has_suggestion(self) -> bool:
@@ -170,8 +176,13 @@ class Verdict:
         """Anything severe enough to justify blocking a merge.
 
         A broken caller is always blocking: the PR demonstrably breaks working code.
+        A refuted finding is not: the skeptic pass challenged it with concrete
+        grounds, and a challenged claim must not block a merge on its own.
         """
-        if any(f.severity.value in BLOCKING_SEVERITIES for f in self.introduces):
+        if any(
+            f.severity.value in BLOCKING_SEVERITIES and not f.refuted
+            for f in self.introduces
+        ):
             return True
         if any(c.severity.value in BLOCKING_SEVERITIES for c in self.broken_callers):
             return True

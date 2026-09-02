@@ -122,6 +122,18 @@ class ReviewConfig:
     ensemble_size: int = 1
     # Findings must appear in at least this many runs to survive (absolute count).
     min_agreement: int = 2
+    # Adversarial refutation (P14): a skeptic model tries to disprove each
+    # surviving finding with concrete grounds. Refuted findings are annotated
+    # (challenged in the review, excluded from inline comments and blocking
+    # status), never dropped. This is the precision gate that lets recall mode
+    # (min_agreement = 1) stay on. Needs a model_fn/skeptic_fn on Enrichment.
+    check_refute: bool = True
+    # Judge-merge (P15): with the ensemble on, a judge model clusters same-file
+    # findings that describe the same defect before agreement is counted, so
+    # two seats reporting one bug differently count as 2/N agreement instead
+    # of two 1/N duplicates. Merge-only, same-file-only; a judge failure falls
+    # back to deterministic grouping.
+    judge_merge: bool = True
 
 
 @dataclass(frozen=True)
@@ -207,6 +219,8 @@ def _build_config(raw: dict) -> Config:
             check_exports=bool(review.get("check_exports", True)),
             ensemble_size=int(review.get("ensemble_size", 1)),
             min_agreement=int(review.get("min_agreement", 2)),
+            check_refute=bool(review.get("check_refute", True)),
+            judge_merge=bool(review.get("judge_merge", True)),
             docs_globs=tuple(
                 review.get("docs_globs", ("**/*.md", "**/*.rst", "**/*.txt", "docs/**"))
             ),

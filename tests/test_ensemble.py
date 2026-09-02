@@ -8,7 +8,11 @@ from collections.abc import Sequence
 
 import pytest
 
-from prime_pr_review.ensemble import LINE_BUCKET, ensemble_review
+from prime_pr_review.ensemble import (
+    LINE_BUCKET,
+    ensemble_review,
+    ensemble_review_detailed,
+)
 from prime_pr_review.github import PullRequest
 from prime_pr_review.review import VerdictError, parse_verdict
 from prime_pr_review.sweep import Reviewer
@@ -463,3 +467,114 @@ def test_size_one_does_not_touch_confidence_even_though_it_is_self_reported():
 
     # Assert: passthrough means the lone self-reported confidence is untouched
     assert verdict.confidence == 0.95
+
+
+# --- judge-merge (P15) --------------------------------------------------------------
+
+PROMPTS_DIR = "skills/pr-review/prompts"
+
+
+def _judge(response: str | Exception):
+    calls: list[str] = []
+
+    def fn(prompt: str) -> str:
+        calls.append(prompt)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    fn.calls = calls  # type: ignore[attr-defined]
+    return fn
+
+
+def test_judge_merges_two_descriptions_of_one_bug_into_shared_agreement():
+    # Arrange: two seats report the same defect far apart in the same file --
+    # different buckets, so deterministic grouping sees two 1/3 singletons.
+    reviewer = scripted_reviewer(
+        _raw(introduces=[_finding(line=10)]),
+        _raw(introduces=[_finding(line=48, claim="Loop bound is off by one")]),
+        _raw(introduces=[]),
+    )
+    judge = _judge(json.dumps({"clusters": [[0, 1]]}))
+
+    # Act
+    verdict, notes = ensemble_review_detailed(
+        make_pr(), PAYLOAD, LANE, reviewer,
+        size=3, min_agreement=2, judge_fn=judge, prompts_dir=PROMPTS_DIR,
+    )
+
+    # Assert: one finding, corroborated 2/3 -- it would have been DROPPED
+    # entirely at min_agreement=2 without the judge.
+    assert len(verdict.introduces) == 1
+    assert "2/3 reviewers" in verdict.introduces[0].corroboration
+    assert verdict.confidence == pytest.approx(2 / 3)
+    assert notes == ("judge-merge: 1 duplicate group(s) merged",)
+
+
+def test_judge_failure_falls_back_to_deterministic_grouping_with_a_note():
+    reviewer = scripted_reviewer(
+        _raw(introduces=[_finding(line=10)]),
+        _raw(introduces=[_finding(line=48)]),
+        _raw(introduces=[]),
+    )
+    judge = _judge(RuntimeError("judge died"))
+
+    verdict, notes = ensemble_review_detailed(
+        make_pr(), PAYLOAD, LANE, reviewer,
+        size=3, min_agreement=1, judge_fn=judge, prompts_dir=PROMPTS_DIR,
+    )
+
+    # Both singletons survive (min_agreement=1) exactly as without a judge.
+    assert len(verdict.introduces) == 2
+    assert any("judge-merge failed" in note for note in notes)
+
+
+def test_judge_is_not_consulted_when_no_two_groups_share_a_file():
+    reviewer = scripted_reviewer(
+        _raw(introduces=[_finding(file="src/a.py")]),
+        _raw(introduces=[_finding(file="src/b.py")]),
+        _raw(introduces=[]),
+    )
+    judge = _judge(json.dumps({"clusters": []}))
+
+    _, notes = ensemble_review_detailed(
+        make_pr(), PAYLOAD, LANE, reviewer,
+        size=3, min_agreement=1, judge_fn=judge, prompts_dir=PROMPTS_DIR,
+    )
+
+    assert judge.calls == []
+    assert notes == ()
+
+
+def test_judge_finding_no_duplicates_leaves_groups_alone_and_says_so():
+    reviewer = scripted_reviewer(
+        _raw(introduces=[_finding(line=10)]),
+        _raw(introduces=[_finding(line=48, claim="A different bug entirely")]),
+        _raw(introduces=[]),
+    )
+    judge = _judge(json.dumps({"clusters": []}))
+
+    verdict, notes = ensemble_review_detailed(
+        make_pr(), PAYLOAD, LANE, reviewer,
+        size=3, min_agreement=1, judge_fn=judge, prompts_dir=PROMPTS_DIR,
+    )
+
+    assert len(verdict.introduces) == 2
+    assert notes == ("judge-merge: no duplicates found",)
+
+
+def test_no_judge_fn_means_identical_behavior_to_the_wrapper():
+    reviewer_a = scripted_reviewer(
+        _raw(introduces=[_finding()]), _raw(introduces=[_finding()]), _raw()
+    )
+    reviewer_b = scripted_reviewer(
+        _raw(introduces=[_finding()]), _raw(introduces=[_finding()]), _raw()
+    )
+
+    detailed, notes = ensemble_review_detailed(
+        make_pr(), PAYLOAD, LANE, reviewer_a, size=3, min_agreement=2
+    )
+    wrapped = ensemble_review(make_pr(), PAYLOAD, LANE, reviewer_b, size=3, min_agreement=2)
+
+    assert detailed == wrapped
+    assert notes == ()

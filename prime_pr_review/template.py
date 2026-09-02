@@ -202,7 +202,8 @@ def _render_issues(verdict: Verdict) -> str:
     heading = "### 3 · Issues"
     blocking = _blocking_findings(verdict)
     non_blocking = _non_blocking_findings(verdict)
-    if not blocking and not non_blocking:
+    refuted = _refuted_findings(verdict)
+    if not blocking and not non_blocking and not refuted:
         return f"{heading}\n\nNo issues found."
 
     lines = [heading, ""]
@@ -212,6 +213,10 @@ def _render_issues(verdict: Verdict) -> str:
         if blocking:
             lines.append("")
         lines.append(_render_non_blocking_details(non_blocking))
+    if refuted:
+        if blocking or non_blocking:
+            lines.append("")
+        lines.append(_render_refuted_details(refuted))
     return "\n".join(lines)
 
 
@@ -219,6 +224,16 @@ def _render_non_blocking_details(findings: tuple[Finding, ...]) -> str:
     count = len(findings)
     items = "\n\n---\n\n".join(_render_finding_narrative(f) for f in findings)
     summary = f"{count} lower-severity {_noun(count, 'issue')}"
+    return f"<details><summary>{summary}</summary>\n\n{items}\n\n</details>"
+
+
+def _render_refuted_details(findings: tuple[Finding, ...]) -> str:
+    """Findings the skeptic pass (P14) challenged. Folded, never hidden: the
+    reader adjudicates between the finder's claim and the skeptic's grounds —
+    the review only refuses to present a challenged claim as settled."""
+    count = len(findings)
+    items = "\n\n---\n\n".join(_render_finding_narrative(f) for f in findings)
+    summary = f"{count} {_noun(count, 'finding')} challenged by the skeptic pass"
     return f"<details><summary>{summary}</summary>\n\n{items}\n\n</details>"
 
 
@@ -233,6 +248,9 @@ def _render_finding_narrative(finding: Finding) -> str:
     if finding.corroboration:
         lines.append("")
         lines.append(f"*corroborated by `{finding.corroboration}`*")
+    if finding.refuted and finding.refutation:
+        lines.append("")
+        lines.append(f"*skeptic: {finding.refutation}*")
     return "\n".join(lines)
 
 
@@ -241,7 +259,13 @@ def _render_finding_narrative(finding: Finding) -> str:
 
 def _render_proposed_changes(verdict: Verdict) -> str:
     heading = "### 4 · Proposed changes"
-    findings = tuple(f for f in _sorted_findings(verdict.introduces) if f.has_suggestion)
+    # A challenged finding's fix is not proposed: committing a suggestion whose
+    # premise the skeptic disputed is exactly the one-click mistake to prevent.
+    findings = tuple(
+        f
+        for f in _sorted_findings(verdict.introduces)
+        if f.has_suggestion and not f.refuted
+    )
     if not findings:
         return f"{heading}\n\nNo committable suggestions for this diff."
 
@@ -365,11 +389,23 @@ def _render_footer() -> str:
 
 
 def _blocking_findings(verdict: Verdict) -> tuple[Finding, ...]:
-    return _sorted_findings(f for f in verdict.introduces if f.severity in _BLOCKING_SEVERITIES)
+    return _sorted_findings(
+        f
+        for f in verdict.introduces
+        if f.severity in _BLOCKING_SEVERITIES and not f.refuted
+    )
 
 
 def _non_blocking_findings(verdict: Verdict) -> tuple[Finding, ...]:
-    return _sorted_findings(f for f in verdict.introduces if f.severity not in _BLOCKING_SEVERITIES)
+    return _sorted_findings(
+        f
+        for f in verdict.introduces
+        if f.severity not in _BLOCKING_SEVERITIES and not f.refuted
+    )
+
+
+def _refuted_findings(verdict: Verdict) -> tuple[Finding, ...]:
+    return _sorted_findings(f for f in verdict.introduces if f.refuted)
 
 
 def _sorted_findings(findings: Iterable[Finding]) -> tuple[Finding, ...]:

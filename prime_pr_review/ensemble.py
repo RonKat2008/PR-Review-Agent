@@ -17,13 +17,17 @@ left to the caller -- nothing here changes how a sweep is assembled.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 
-from collections.abc import Callable
-
+from . import judge as judge_mod
 from .github import PullRequest
 from .review import Finding, FixClaim, Severity, Verdict, VerdictError, parse_verdict
+
+# Mirrors sweep.DEFAULT_PROMPTS_DIR, declared locally: sweep imports this module,
+# so importing sweep back from here would be a circular import.
+DEFAULT_PROMPTS_DIR = Path("skills/pr-review/prompts")
 
 # Structurally identical to sweep.Reviewer, declared locally instead of imported:
 # sweep imports this module to wire the ensemble in, so importing sweep back
@@ -62,9 +66,35 @@ def ensemble_review(
     size: int = 3,
     min_agreement: int = 2,
 ) -> Verdict:
+    """Back-compatible entry point: `ensemble_review_detailed` minus the notes."""
+    verdict, _ = ensemble_review_detailed(
+        pr, payload, lane, reviewer, size=size, min_agreement=min_agreement
+    )
+    return verdict
+
+
+def ensemble_review_detailed(
+    pr: PullRequest,
+    payload: str,
+    lane: str,
+    reviewer: Reviewer,
+    size: int = 3,
+    min_agreement: int = 2,
+    judge_fn: Callable[[str], str] | None = None,
+    prompts_dir: Path | str = DEFAULT_PROMPTS_DIR,
+) -> tuple[Verdict, tuple[str, ...]]:
     """Run `reviewer` against the same `(pr, payload, lane)` `size` times and
     merge the results into one Verdict via observed agreement, not any single
-    run's self-reported confidence.
+    run's self-reported confidence. Returns the verdict plus activity notes
+    (currently only the judge-merge pass emits any).
+
+    With `judge_fn` set, the P15 judge-merge pass runs between deterministic
+    grouping and the `min_agreement` filter: a model proposes which same-file
+    groups describe the same underlying defect, and validated clusters are
+    merged with their distinct-run sets unioned — so two seats describing one
+    bug differently count as 2/size agreement instead of two 1/size
+    duplicates. A judge failure falls back to the deterministic grouping with
+    a note; it can never fail the review.
 
     `size=1` is the off switch and the cost lever: exactly one call, and the
     result is `parse_verdict` of its response, completely unchanged -- no
@@ -100,7 +130,7 @@ def ensemble_review(
          arbitrarily picking a winner while pretending it was a vote.
     """
     if size == 1:
-        return parse_verdict(reviewer(pr, payload, lane))
+        return parse_verdict(reviewer(pr, payload, lane)), ()
 
     runs, failures = _collect_runs(pr, payload, lane, reviewer, size)
     if not runs:
@@ -109,10 +139,13 @@ def ensemble_review(
         )
 
     groups = _group_findings(runs)
+    notes: tuple[str, ...] = ()
+    if judge_fn is not None:
+        groups, notes = _judge_merge(groups, judge_fn, prompts_dir)
     survivors = tuple(group for group in groups if group.matches >= min_agreement)
     first = runs[0]
 
-    return Verdict(
+    verdict = Verdict(
         introduces=tuple(_finalize(group, size) for group in survivors),
         fixes=_merge_fixes(runs),
         confidence=_confidence(survivors, runs, size),
@@ -121,6 +154,7 @@ def ensemble_review(
         files=first.files,
         manual_checks=first.manual_checks,
     )
+    return verdict, notes
 
 
 def _collect_runs(
@@ -147,12 +181,18 @@ def _collect_runs(
 @dataclass(frozen=True)
 class _Group:
     """Every finding across all runs that normalized to the same match key,
-    plus how many DISTINCT runs reported it. A run that reports the same key
+    plus WHICH distinct runs reported it. A run that reports the same key
     twice (two findings that both round into one bucket) still counts once --
-    agreement is measured in reviewers, not in raw finding count."""
+    agreement is measured in reviewers, not in raw finding count. The run
+    identities (not just a count) are kept so the judge-merge pass can union
+    two groups without double-counting a run that reported both."""
 
     candidates: tuple[Finding, ...]
-    matches: int
+    runs: frozenset[int]
+
+    @property
+    def matches(self) -> int:
+        return len(self.runs)
 
 
 def _finding_key(finding: Finding) -> tuple[str, int | None, Severity]:
@@ -165,21 +205,75 @@ def _finding_key(finding: Finding) -> tuple[str, int | None, Severity]:
 def _group_findings(runs: Sequence[Verdict]) -> tuple[_Group, ...]:
     """Every `introduces` finding from every run, grouped by `_finding_key`."""
     candidates: dict[tuple[str, int | None, Severity], list[Finding]] = {}
-    run_counts: dict[tuple[str, int | None, Severity], int] = {}
+    run_ids: dict[tuple[str, int | None, Severity], set[int]] = {}
 
-    for run in runs:
-        keys_in_this_run: set[tuple[str, int | None, Severity]] = set()
+    for run_index, run in enumerate(runs):
         for finding in run.introduces:
             key = _finding_key(finding)
             candidates.setdefault(key, []).append(finding)
-            keys_in_this_run.add(key)
-        for key in keys_in_this_run:
-            run_counts[key] = run_counts.get(key, 0) + 1
+            run_ids.setdefault(key, set()).add(run_index)
 
     return tuple(
-        _Group(candidates=tuple(items), matches=run_counts[key])
+        _Group(candidates=tuple(items), runs=frozenset(run_ids[key]))
         for key, items in candidates.items()
     )
+
+
+def _judge_merge(
+    groups: tuple[_Group, ...],
+    judge_fn: Callable[[str], str],
+    prompts_dir: Path | str,
+) -> tuple[tuple[_Group, ...], tuple[str, ...]]:
+    """Run the P15 judge over the deterministic groups and merge its clusters.
+
+    Consulted only when two groups share a file — the judge merges same-file
+    groups exclusively (enforced again in `judge.propose_clusters`), so any
+    other shape has nothing for it to do. All merging arithmetic stays here,
+    deterministic: the model proposes, this function disposes.
+    """
+    files = [g.candidates[0].file for g in groups]
+    if len(files) == len(set(files)):
+        return groups, ()
+
+    judge_candidates = tuple(
+        judge_mod.Candidate(
+            index=index,
+            file=representative.file,
+            line=representative.line,
+            severity=representative.severity.value,
+            claim=representative.claim,
+            evidence=representative.evidence,
+        )
+        for index, representative in (
+            (i, _pick_representative(g.candidates)) for i, g in enumerate(groups)
+        )
+    )
+
+    try:
+        clusters = judge_mod.propose_clusters(judge_candidates, judge_fn, prompts_dir)
+    except Exception as exc:  # noqa: BLE001 - fall back, never fail the review
+        return groups, (f"judge-merge failed: {exc}",)
+
+    if not clusters:
+        return groups, ("judge-merge: no duplicates found",)
+
+    merged_away: set[int] = set()
+    merged_groups: dict[int, _Group] = {}
+    for cluster in clusters:
+        head = min(cluster)
+        members = [groups[i] for i in cluster]
+        merged_groups[head] = _Group(
+            candidates=tuple(c for g in members for c in g.candidates),
+            runs=frozenset().union(*(g.runs for g in members)),
+        )
+        merged_away.update(i for i in cluster if i != head)
+
+    result = tuple(
+        merged_groups.get(i, group)
+        for i, group in enumerate(groups)
+        if i not in merged_away
+    )
+    return result, (f"judge-merge: {len(clusters)} duplicate group(s) merged",)
 
 
 def _finalize(group: _Group, size: int) -> Finding:

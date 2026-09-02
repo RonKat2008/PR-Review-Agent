@@ -162,7 +162,11 @@ def _post_inline_review(
     to delivery, never a filter on content.
     """
     commentable = reviews_api.commentable_lines(diff)
-    comments, unanchored = reviews_api.build_review_comments(verdict.introduces, commentable)
+    # Refuted findings never post inline: an anchored comment carrying a
+    # one-click suggestion reads as settled, and a challenged claim is not.
+    # They remain visible in the summary body, marked as challenged.
+    active = tuple(f for f in verdict.introduces if not f.refuted)
+    comments, unanchored = reviews_api.build_review_comments(active, commentable)
 
     summary = body
     if unanchored:
