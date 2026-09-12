@@ -7,6 +7,7 @@ import pytest
 
 from prime_pr_review.providers import (
     BASE_URL,
+    MAX_ATTEMPTS,
     BudgetExceeded,
     CostMeter,
     MeterBox,
@@ -77,6 +78,30 @@ def test_chat_retries_429_then_succeeds():
 def test_chat_gives_up_after_max_attempts():
     with pytest.raises(ProviderError):
         chat(_client(lambda r: httpx.Response(503)), "m/a", "p", sleep=lambda s: None)
+
+
+def test_chat_does_not_sleep_after_final_attempt():
+    calls = []
+    sleeps = []
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(503)
+    with pytest.raises(ProviderError):
+        chat(_client(handler), "m/a", "p", sleep=lambda s: sleeps.append(s))
+    assert len(calls) == MAX_ATTEMPTS
+    assert len(sleeps) == MAX_ATTEMPTS - 1
+
+
+def test_chat_non_retryable_status_fails_immediately():
+    calls = []
+    sleeps = []
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(401)
+    with pytest.raises(ProviderError):
+        chat(_client(handler), "m/a", "p", sleep=lambda s: sleeps.append(s))
+    assert len(calls) == 1
+    assert len(sleeps) == 0
 
 
 def test_model_fn_records_usage_into_box():

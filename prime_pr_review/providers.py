@@ -130,7 +130,8 @@ def chat(client: httpx.Client, model: str, prompt: str,
             last = f"HTTP {response.status_code}: {response.text[:200]}"
             if response.status_code not in RETRYABLE_STATUS:
                 break
-        sleep(BACKOFF_BASE_SECONDS * (2 ** attempt) + random.uniform(0, 1))
+        if attempt < MAX_ATTEMPTS - 1:
+            sleep(BACKOFF_BASE_SECONDS * (2 ** attempt) + random.uniform(0, 1))
     raise ProviderError(f"{model}: {last}")
 
 
