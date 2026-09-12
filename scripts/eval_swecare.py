@@ -62,7 +62,8 @@ from prime_pr_review.sweep import Enrichment, sweep_lane
 
 DATASET_URL = "https://datasets-server.huggingface.co/rows"
 DATASET = "inclusionAI/SWE-CARE"
-SEATS = ("deepseek/deepseek-v4-pro", "qwen/qwen3.8-max", "z-ai/glm-5.2")
+SEATS = ("deepseek/deepseek-v4-pro", "openai/gpt-5.4-mini", "z-ai/glm-5.2")
+SEAT_OPTIONS: dict[str, dict] = {"openai/gpt-5.4-mini": {"reasoning": {"effort": "medium"}}}
 AUX_MODEL = "deepseek/deepseek-v4-flash"
 SKEPTIC_MODEL = JUDGE_MODEL = "deepseek/deepseek-v4-pro"
 PROMPTS_DIR = AGENT_ROOT / "skills" / "pr-review" / "prompts"
@@ -77,6 +78,8 @@ LIMITATIONS = (
      "are scored raw and again with validation applied afterwards."),
     ("Reference comments without a line number are excluded from the recall denominator; they still "
      "count for file-level matching."),
+    ("Evaluation seat 2 is openai/gpt-5.4-mini (reasoning effort medium) instead of the production "
+     "lineup's qwen/qwen3.8-max, which reasons without bound (~7 min and $0.10 per PR)."),
 )
 
 
@@ -92,7 +95,7 @@ class Provider:
 
 def build_provider(client: httpx.Client, box: MeterBox) -> Provider:
     return Provider(
-        make_reviewer_model_fn=lambda model: prime_model_fn(client, model, box),
+        make_reviewer_model_fn=lambda model: prime_model_fn(client, model, box, extra=SEAT_OPTIONS.get(model)),
         aux_fn=prime_model_fn(client, AUX_MODEL, box),
         skeptic_fn=prime_model_fn(client, SKEPTIC_MODEL, box),
         judge_fn=prime_model_fn(client, JUDGE_MODEL, box),
@@ -264,7 +267,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     rows = select(fetch_rows(EVAL_ROOT / "corpus" / "swecare-test.json", _fetch_page), args.count, args.seed)
     (run_dir / "rows.json").write_text(json.dumps({"rows": [{"row": _row_raw(r)} for r in rows]}), encoding="utf-8")
     (run_dir / "config.json").write_text(json.dumps({"run_id": run_id, "count": args.count, "seed": args.seed,
-                                                     "cap_usd": args.cap_usd, "seats": SEATS}), encoding="utf-8")
+                                                     "cap_usd": args.cap_usd, "seats": SEATS,
+                                                     "seat_options": SEAT_OPTIONS}), encoding="utf-8")
     client = make_client(resolve_prime_key())
     pricing = fetch_pricing(client, [*SEATS, AUX_MODEL, SKEPTIC_MODEL, JUDGE_MODEL])
     meter_path = run_dir / "meter.json"

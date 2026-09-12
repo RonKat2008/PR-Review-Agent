@@ -138,6 +138,42 @@ def test_model_fn_records_usage_into_box():
     assert fn("p") == "x" and box.meter.spent_usd == pytest.approx(2.0)
 
 
+def test_chat_merges_extra_into_body():
+    seen = []
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return _ok("done")
+    text, _ = chat(_client(handler), "m/a", "p", sleep=lambda s: None,
+                   extra={"reasoning": {"effort": "medium"}})
+    assert text == "done"
+    body = seen[0]
+    assert body["reasoning"] == {"effort": "medium"}
+    assert body["model"] == "m/a"
+    assert body["messages"] == [{"role": "user", "content": "p"}]
+    assert body["temperature"] == 0
+    assert body["max_tokens"] == MAX_COMPLETION_TOKENS
+
+
+def test_chat_without_extra_omits_key():
+    seen = []
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return _ok("done")
+    chat(_client(handler), "m/a", "p", sleep=lambda s: None)
+    assert "reasoning" not in seen[0]
+
+
+def test_model_fn_forwards_extra_into_posted_body():
+    seen = []
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return _ok("x")
+    box = MeterBox(CostMeter(cap_usd=10, pricing=PRICING))
+    fn = prime_model_fn(_client(handler), "m/a", box, extra={"reasoning": {"effort": "medium"}})
+    fn("p")
+    assert seen[0]["reasoning"] == {"effort": "medium"}
+
+
 def test_reviewer_builds_lane_prompt(tmp_path):
     (tmp_path / "open_pr.md").write_text("TEMPLATE", encoding="utf-8")
     seen = []
@@ -147,6 +183,17 @@ def test_reviewer_builds_lane_prompt(tmp_path):
     reviewer = prime_reviewer(_client(handler), "m/a", box, tmp_path)
     assert reviewer(make_pr(), "DIFF", "open") == "v"
     assert seen[0].startswith("TEMPLATE") and "DIFF" in seen[0]
+
+
+def test_reviewer_forwards_extra(tmp_path):
+    (tmp_path / "open_pr.md").write_text("TEMPLATE", encoding="utf-8")
+    seen = []
+    def handler(req):
+        seen.append(json.loads(req.content)); return _ok("v")
+    box = MeterBox(CostMeter(cap_usd=10, pricing=PRICING))
+    reviewer = prime_reviewer(_client(handler), "m/a", box, tmp_path, extra={"reasoning": {"effort": "medium"}})
+    reviewer(make_pr(), "DIFF", "open")
+    assert seen[0]["reasoning"] == {"effort": "medium"}
 
 
 def test_resolve_key_prefers_env_then_config(tmp_path):

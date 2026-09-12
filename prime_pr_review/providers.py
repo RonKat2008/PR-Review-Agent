@@ -117,9 +117,12 @@ def fetch_pricing(client: httpx.Client, models: Sequence[str]) -> dict[str, tupl
 
 
 def chat(client: httpx.Client, model: str, prompt: str,
-         sleep: Callable[[float], None] = time.sleep) -> tuple[str, Usage]:
+         sleep: Callable[[float], None] = time.sleep,
+         extra: Mapping[str, object] | None = None) -> tuple[str, Usage]:
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0,
             "max_tokens": MAX_COMPLETION_TOKENS}
+    if extra:
+        body = {**body, **extra}
     last = "no attempts"
     for attempt in range(MAX_ATTEMPTS):
         try:
@@ -155,16 +158,18 @@ def _extract(payload: dict) -> tuple[str, Usage]:
         raise ProviderError(f"unexpected response shape: {payload!r}"[:300]) from exc
 
 
-def prime_model_fn(client: httpx.Client, model: str, box: MeterBox) -> ModelFn:
+def prime_model_fn(client: httpx.Client, model: str, box: MeterBox,
+                   extra: Mapping[str, object] | None = None) -> ModelFn:
     def model_fn(prompt: str) -> str:
-        text, usage = chat(client, model, prompt)
+        text, usage = chat(client, model, prompt, extra=extra)
         box.meter = box.meter.record(model, usage)
         return text
     return model_fn
 
 
-def prime_reviewer(client: httpx.Client, model: str, box: MeterBox, prompts_dir: Path | str) -> Reviewer:
-    model_fn = prime_model_fn(client, model, box)
+def prime_reviewer(client: httpx.Client, model: str, box: MeterBox, prompts_dir: Path | str,
+                   extra: Mapping[str, object] | None = None) -> Reviewer:
+    model_fn = prime_model_fn(client, model, box, extra=extra)
     def reviewer(pr: PullRequest, payload: str, lane: str) -> str:
         template = (Path(prompts_dir) / f"{lane}_pr.md").read_text(encoding="utf-8")
         return model_fn(build_prompt(template, pr, payload))

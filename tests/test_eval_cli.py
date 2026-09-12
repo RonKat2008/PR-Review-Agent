@@ -5,8 +5,10 @@ import json
 import sys
 from pathlib import Path
 
+import httpx
+
 from prime_pr_review.evaluation.corpus import parse_rows
-from prime_pr_review.providers import CostMeter, MeterBox
+from prime_pr_review.providers import BASE_URL, CostMeter, MeterBox
 from prime_pr_review.review import Finding, Severity, Verdict
 
 from .conftest import make_config
@@ -67,6 +69,27 @@ def test_eval_config_locks_down_and_targets_row():
     assert cfg.review.dry_run and cfg.repo.read_only and not cfg.sinks.pr_comment
     assert (cfg.repo.owner, cfg.repo.name) == tuple(row.repo.split("/"))
     assert cfg.review.ensemble_size == 3 and cfg.review.min_agreement == 1 and cfg.review.repo_root == ""
+
+
+def test_build_provider_forwards_seat_options_for_gpt_5_4_mini():
+    mod = _load()
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "v"}}],
+                                         "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url=BASE_URL)
+    pricing = {m: (1.0, 1.0) for m in mod.SEATS}
+    box = MeterBox(CostMeter(cap_usd=10, pricing=pricing))
+    provider = mod.build_provider(client, box)
+
+    provider.make_reviewer_model_fn("openai/gpt-5.4-mini")("p")
+    assert seen[-1]["reasoning"] == {"effort": "medium"}
+
+    provider.make_reviewer_model_fn("z-ai/glm-5.2")("p")
+    assert "reasoning" not in seen[-1]
 
 
 def test_run_one_writes_layout_and_is_resumable(tmp_path):
