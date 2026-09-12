@@ -50,3 +50,10 @@ def test_aggregate_micro_averages():
 def test_aggregate_with_zero_findings_is_defined():
     a = aggregate("x", "off", [InstanceScore(0, 0, 0, 1, 0, 0)], fabricated_total=0)
     assert a.precision == 0.0 and a.recall == 0.0 and a.fabrication_rate == 0.0
+
+
+def test_line_less_refs_are_excluded_from_recall_but_count_at_file_level():
+    refs = (ref(line=10), ReferenceComment(path="a.py", line=None, start_line=None, text="t"))
+    v = Verdict(introduces=(f(line=10),), fixes=(), confidence=0.9)
+    s = score_instance(v, refs)
+    assert s.refs == 1 and s.matched_refs == 1 and s.file_matched_findings == 1

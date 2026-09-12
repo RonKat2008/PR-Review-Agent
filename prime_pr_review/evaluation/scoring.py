@@ -3,7 +3,10 @@
 A finding matches a reference comment on the same path when its line falls in
 the comment's range widened by `window` lines. Refuted findings are treated as
 not reported. Metrics are micro-averaged across instances. `fabrication_rate`
-is dropped / (kept + dropped): the share of raw findings that pointed nowhere."""
+is dropped / (kept + dropped): the share of raw findings that pointed nowhere.
+Line-less (file-level) reference comments can never satisfy `match()`, so they
+are excluded from the recall denominator/numerator but still count toward
+file-level matching."""
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -46,11 +49,18 @@ def match(finding: Finding, ref: ReferenceComment, window: int = DEFAULT_WINDOW)
 
 def score_instance(verdict: Verdict | None, refs: Sequence[ReferenceComment], dropped: int = 0,
                    window: int = DEFAULT_WINDOW) -> InstanceScore:
+    """Score a verdict's findings against reference comments.
+
+    Line-less references are excluded from `refs`/`matched_refs` (recall)
+    since `match()` can never satisfy them, but still count toward
+    `file_matched_findings`.
+    """
     findings = tuple(f for f in (verdict.introduces if verdict else ()) if not f.refuted)
+    anchored = tuple(r for r in refs if r.line is not None)
     matched = sum(any(match(f, r, window) for r in refs) for f in findings)
     file_matched = sum(any(f.file == r.path for r in refs) for f in findings)
-    matched_refs = sum(any(match(f, r, window) for f in findings) for r in refs)
-    return InstanceScore(len(findings), matched, file_matched, len(refs), matched_refs, dropped)
+    matched_refs = sum(any(match(f, r, window) for f in findings) for r in anchored)
+    return InstanceScore(len(findings), matched, file_matched, len(anchored), matched_refs, dropped)
 
 
 def aggregate(arm: str, mode: str, scores: Sequence[InstanceScore], fabricated_total: int) -> Aggregate:
