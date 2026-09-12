@@ -49,7 +49,26 @@ def test_aggregate_micro_averages():
 
 def test_aggregate_with_zero_findings_is_defined():
     a = aggregate("x", "off", [InstanceScore(0, 0, 0, 1, 0, 0)], fabricated_total=0)
-    assert a.precision == 0.0 and a.recall == 0.0 and a.fabrication_rate == 0.0
+    assert a.precision == 0.0 and a.recall == 0.0
+
+
+def test_fabrication_is_not_measured_without_citation_validation():
+    """The `off` row never ran validation, so it has no fabrication rate to
+    report -- 0.0 would read as "nothing fabricated"."""
+    scores = [InstanceScore(2, 1, 2, 2, 1, 0)]
+    assert aggregate("full", "off", scores, fabricated_total=0).fabrication_rate is None
+    assert aggregate("full", "on", scores, fabricated_total=0).fabrication_rate == 0.0
+
+
+def test_aggregate_divides_cost_and_seconds_by_instances():
+    scores = [InstanceScore(1, 0, 0, 1, 0, 0), InstanceScore(1, 0, 0, 1, 0, 0)]
+    a = aggregate("ensemble", "on", scores, fabricated_total=0, cost_usd=0.5, seconds=30.0)
+    assert a.cost_usd_per_pr == 0.25 and a.seconds_per_pr == 15.0
+
+
+def test_aggregate_without_instances_reports_zero_cost():
+    a = aggregate("ensemble", "on", [], fabricated_total=0, cost_usd=1.0, seconds=9.0)
+    assert a.cost_usd_per_pr == 0.0 and a.seconds_per_pr == 0.0
 
 
 def test_line_less_refs_are_excluded_from_recall_but_count_at_file_level():

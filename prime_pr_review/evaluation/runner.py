@@ -15,6 +15,11 @@ from ..github import GhRunner, GitHubError
 from .corpus import Row
 
 CONTENTS_RE = re.compile(r"^repos/[^/]+/[^/]+/contents/(?P<path>.+?)\?ref=")
+# `gh api` turns any of these into a non-GET request. The eval runner is
+# read-only by construction, so a write reaching it is a wiring bug, not a
+# call to answer -- and the endpoints it *does* answer (issue comments) are
+# exactly the ones a stray write would post to.
+WRITE_FLAGS = frozenset({"-X", "--method", "-f", "-F"})
 EVAL_AUTHOR = "swe-care"
 EVAL_BASE_REF = "main"
 
@@ -59,6 +64,8 @@ def corpus_runner(row: Row, fallback: GhRunner, head_files: HeadFileStore) -> Gh
     listing = pr_list_json(row)
 
     def runner(args: Sequence[str], stdin: str | None = None) -> str:
+        if _is_write(args):
+            raise GitHubError(f"eval runner: refusing write gh call: {list(args)!r}")
         head = tuple(args[:2])
         if head == ("pr", "list"):
             return listing
@@ -82,6 +89,10 @@ def replay_runner(store: HeadFileStore) -> GhRunner:
             raise GitHubError(f"eval replay: no recorded head file for {list(args)!r}")
         return text
     return runner
+
+
+def _is_write(args: Sequence[str]) -> bool:
+    return bool(args) and args[0] == "api" and any(a in WRITE_FLAGS for a in args)
 
 
 def _contents_path(args: Sequence[str]) -> str | None:

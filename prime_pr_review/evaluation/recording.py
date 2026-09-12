@@ -17,6 +17,7 @@ from ..reviewers import build_prompt
 
 ModelFn = Callable[[str], str]
 Reviewer = Callable[[PullRequest, str, str], str]
+UsageSource = Callable[[], tuple[int, int]]  # -> (prompt_tokens, completion_tokens) of the last call
 CALLS_DIR = "calls"
 DONE_MARKER = "done"
 
@@ -59,18 +60,24 @@ class Recorder:
         return tuple(c for c in loaded if role is None or c.role == role)
 
 
-def recording_model_fn(role: str, model: str, inner: ModelFn, recorder: Recorder) -> ModelFn:
+def recording_model_fn(role: str, model: str, inner: ModelFn, recorder: Recorder,
+                       usage_source: UsageSource | None = None) -> ModelFn:
+    """Wrap `inner` so every call lands on disk. `usage_source` is read *after*
+    the call and reports the tokens that call consumed; without it the
+    recording carries (0, 0) and every offline cost reads as free."""
     def model_fn(prompt: str) -> str:
         started = time.monotonic()
         response = inner(prompt)
-        recorder.record(role, model, prompt, response, time.monotonic() - started)
+        usage = usage_source() if usage_source is not None else (0, 0)
+        recorder.record(role, model, prompt, response, time.monotonic() - started, usage=usage)
         return response
     return model_fn
 
 
 def recording_reviewer(seat_models: Sequence[str], make_model_fn: Callable[[str], ModelFn],
-                       recorder: Recorder, prompts_dir: Path | str) -> Reviewer:
-    seats = [recording_model_fn("seat", m, make_model_fn(m), recorder) for m in seat_models]
+                       recorder: Recorder, prompts_dir: Path | str,
+                       usage_source: UsageSource | None = None) -> Reviewer:
+    seats = [recording_model_fn("seat", m, make_model_fn(m), recorder, usage_source) for m in seat_models]
     counter = {"k": 0}
 
     def reviewer(pr: PullRequest, payload: str, lane: str) -> str:
@@ -95,16 +102,38 @@ def replay_model_fn(recorder: Recorder, role: str) -> ModelFn:
     return model_fn
 
 
-def replay_reviewer(recorder: Recorder) -> Reviewer:
-    responses = [c.response for c in recorder.calls("seat")]
+def seat_calls(recorder: Recorder, seat_models: Sequence[str]) -> tuple[Call | None, ...]:
+    """The recorded call per seat *position*, `None` where that seat has none.
+
+    Recorded position is not seat identity: a seat whose live call failed wrote
+    no record, so indexing the sequence would relabel every seat after it. Seats
+    are matched by model instead; a model listed twice takes its recordings in
+    order."""
+    calls = recorder.calls("seat")
+    picked: list[Call | None] = []
+    for index, model in enumerate(seat_models):
+        matching = [c for c in calls if c.model == model]
+        occurrence = list(seat_models[:index]).count(model)
+        picked.append(matching[occurrence] if occurrence < len(matching) else None)
+    return tuple(picked)
+
+
+def replay_reviewer(recorder: Recorder, seat_models: Sequence[str]) -> Reviewer:
+    """Serve the ensemble's k-th call from the k-th *seat*, not the k-th
+    recording. A seat with no recording raises rather than letting the next
+    seat's verdict stand in for it."""
+    seats = seat_calls(recorder, seat_models)
     counter = {"k": 0}
 
     def reviewer(pr: PullRequest, payload: str, lane: str) -> str:
-        if counter["k"] >= len(responses):
-            raise ReplayMiss("more seat calls than recorded")
-        response = responses[counter["k"]]
+        index = counter["k"]
         counter["k"] += 1
-        return response
+        if index >= len(seats):
+            raise ReplayMiss("more seat calls than seats")
+        call = seats[index]
+        if call is None:
+            raise ReplayMiss(f"no recorded response for seat {index + 1} ({seat_models[index]})")
+        return call.response
     return reviewer
 
 

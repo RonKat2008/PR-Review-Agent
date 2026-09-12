@@ -57,6 +57,18 @@ def test_runner_rejects_unexpected_calls(tmp_path):
         run(["pr", "comment", "7"], "body")
 
 
+def test_runner_rejects_write_api_calls(tmp_path):
+    """A write attempt must never reach the real `gh`, even on an endpoint the
+    read path would otherwise answer (`.../comments`)."""
+    run = corpus_runner(_row(), fallback=lambda a, s: "NEVER", head_files=HeadFileStore(tmp_path / "h.json"))
+    for args in (["api", "repos/o/r/issues/7/comments", "-X", "POST"],
+                 ["api", "repos/o/r/issues/7/comments", "--method", "POST"],
+                 ["api", "repos/o/r/issues/7/comments", "-f", "body=hi"],
+                 ["api", "repos/o/r/contents/a.py?ref=abc123", "-F", "body=@f"]):
+        with pytest.raises(GitHubError, match="write"):
+            run(args, None)
+
+
 def test_replay_runner_serves_store(tmp_path):
     store = HeadFileStore(tmp_path / "h.json"); store.put("a.py", "B64"); store.put("gone.py", None)
     run = replay_runner(store)

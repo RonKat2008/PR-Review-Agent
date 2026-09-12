@@ -87,7 +87,7 @@ def test_chat_raises_on_null_content_with_finish_reason_length():
         })
     with pytest.raises(ProviderError, match="finish_reason=length"):
         chat(_client(handler), "m/a", "p", sleep=lambda s: None)
-    assert len(calls) == 1
+    assert len(calls) == MAX_ATTEMPTS
 
 
 def test_chat_raises_on_whitespace_only_content():
@@ -100,7 +100,47 @@ def test_chat_raises_on_whitespace_only_content():
         })
     with pytest.raises(ProviderError, match="finish_reason=length"):
         chat(_client(handler), "m/a", "p", sleep=lambda s: None)
-    assert len(calls) == 1
+    assert len(calls) == MAX_ATTEMPTS
+
+
+def test_chat_retries_empty_content_then_succeeds():
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        if len(seen) == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}}],
+                                             "usage": {"prompt_tokens": 1, "completion_tokens": 0}})
+        return _ok("recovered")
+
+    text, _ = chat(_client(handler), "m/a", "p", sleep=lambda s: None)
+    assert text == "recovered" and len(seen) == 2
+
+
+def test_chat_retries_undecodable_json_then_succeeds():
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        if len(seen) == 1:
+            return httpx.Response(200, content=b"not json at all",
+                                  headers={"content-type": "application/json"})
+        return _ok("recovered")
+
+    text, _ = chat(_client(handler), "m/a", "p", sleep=lambda s: None)
+    assert text == "recovered" and len(seen) == 2
+
+
+def test_chat_gives_up_after_undecodable_json():
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        return httpx.Response(200, content=b"{oops", headers={"content-type": "application/json"})
+
+    with pytest.raises(ProviderError):
+        chat(_client(handler), "m/a", "p", sleep=lambda s: None)
+    assert len(seen) == MAX_ATTEMPTS
 
 
 def test_chat_gives_up_after_max_attempts():
@@ -136,6 +176,14 @@ def test_model_fn_records_usage_into_box():
     box = MeterBox(CostMeter(cap_usd=10, pricing=PRICING))
     fn = prime_model_fn(_client(lambda r: _ok("x", 1_000_000, 0)), "m/a", box)
     assert fn("p") == "x" and box.meter.spent_usd == pytest.approx(2.0)
+
+
+def test_model_fn_records_last_usage_on_box():
+    box = MeterBox(CostMeter(cap_usd=10, pricing=PRICING))
+    assert box.last_usage is None
+    fn = prime_model_fn(_client(lambda r: _ok("x", 11, 22)), "m/a", box)
+    fn("p")
+    assert box.last_usage == Usage(11, 22)
 
 
 def test_chat_merges_extra_into_body():

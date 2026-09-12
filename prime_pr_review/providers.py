@@ -79,8 +79,10 @@ class CostMeter:
 
 @dataclass
 class MeterBox:
-    """The single mutable cell: holds the current (immutable) meter."""
+    """The single mutable cell: holds the current (immutable) meter, plus the
+    usage of the most recent call so a recorder can attribute tokens to it."""
     meter: CostMeter
+    last_usage: Usage | None = None
 
 
 def resolve_prime_key(env: Mapping[str, str] | None = None, config_path: Path = DEFAULT_CONFIG_PATH) -> str:
@@ -131,10 +133,17 @@ def chat(client: httpx.Client, model: str, prompt: str,
             last = repr(exc)
         else:
             if response.status_code == 200:
-                return _extract(response.json())
-            last = f"HTTP {response.status_code}: {response.text[:200]}"
-            if response.status_code not in RETRYABLE_STATUS:
-                break
+                # A 200 carrying no usable content (empty/None message, or a
+                # body that is not JSON at all) is a transient provider fault,
+                # not a verdict -- retry it on the same backoff as a 503.
+                try:
+                    return _extract(response.json())
+                except (ProviderError, json.JSONDecodeError) as exc:
+                    last = str(exc)
+            else:
+                last = f"HTTP {response.status_code}: {response.text[:200]}"
+                if response.status_code not in RETRYABLE_STATUS:
+                    break
         if attempt < MAX_ATTEMPTS - 1:
             sleep(BACKOFF_BASE_SECONDS * (2 ** attempt) + random.uniform(0, 1))
     raise ProviderError(f"{model}: {last}")
@@ -163,6 +172,7 @@ def prime_model_fn(client: httpx.Client, model: str, box: MeterBox,
     def model_fn(prompt: str) -> str:
         text, usage = chat(client, model, prompt, extra=extra)
         box.meter = box.meter.record(model, usage)
+        box.last_usage = usage
         return text
     return model_fn
 

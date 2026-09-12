@@ -12,6 +12,7 @@ from prime_pr_review.evaluation.corpus import (
     fetch_rows,
     parse_rows,
     select,
+    select_with_counts,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "swecare_rows.json"
@@ -44,6 +45,26 @@ def test_select_requires_a_comment_with_a_path():
                                                  "start_line": None, "original_start_line": None,
                                                  "text": "", "diff_hunk": ""}])}]}
     assert select(parse_rows(payload), count=1, seed=0) == ()
+
+def test_select_with_counts_reports_every_filter(rows):
+    payload = {"rows": [
+        {"row": _row(comments=[{"path": "a.py", "line": 1, "original_line": 1, "start_line": None,
+                                "original_start_line": None, "text": "t", "diff_hunk": ""}])},
+        {"row": {**_row(comments=[]), "language": "Go"}},
+        {"row": _row(comments=[{"path": "", "line": 1, "original_line": 1, "start_line": None,
+                                "original_start_line": None, "text": "", "diff_hunk": ""}])},
+    ]}
+    parsed = parse_rows(payload)
+    selected, counts = select_with_counts(parsed, count=5, seed=0, max_patch_bytes=10_000)
+    assert counts == {"total": 3, "not_python": 1, "oversize": 0, "unscorable": 1,
+                      "eligible": 1, "selected": 1}
+    assert selected == select(parsed, count=5, seed=0, max_patch_bytes=10_000)
+
+
+def test_select_with_counts_counts_oversize_patches(rows):
+    _, counts = select_with_counts(rows, count=3, seed=0, max_patch_bytes=10)
+    assert counts["oversize"] == counts["total"] and counts["selected"] == 0
+
 
 def test_fetch_rows_pages_then_caches(tmp_path):
     calls: list[tuple[int, int]] = []

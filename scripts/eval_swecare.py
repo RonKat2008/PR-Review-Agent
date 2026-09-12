@@ -26,7 +26,7 @@ from prime_pr_review.evaluation.corpus import (
     Row,
     fetch_rows,
     parse_rows,
-    select,
+    select_with_counts,
 )
 from prime_pr_review.evaluation.recording import (
     Recorder,
@@ -36,21 +36,19 @@ from prime_pr_review.evaluation.recording import (
     recording_reviewer,
 )
 from prime_pr_review.evaluation.report import render_markdown
-from prime_pr_review.evaluation.runner import (
-    HeadFileStore,
-    corpus_runner,
-    pr_list_json,
+from prime_pr_review.evaluation.runner import HeadFileStore, corpus_runner
+from prime_pr_review.evaluation.scorer import (
+    Accumulator,
+    build_aggregates,
+    load_pricing,
+    score_instance_dir,
 )
-from prime_pr_review.evaluation.scoring import (
-    Aggregate,
-    aggregate,
-    match,
-    score_instance,
-)
+from prime_pr_review.evaluation.scoring import Aggregate
 from prime_pr_review.providers import (
     BudgetExceeded,
     CostMeter,
     MeterBox,
+    Usage,
     fetch_pricing,
     make_client,
     prime_model_fn,
@@ -78,6 +76,9 @@ LIMITATIONS = (
      "are scored raw and again with validation applied afterwards."),
     ("Reference comments without a line number are excluded from the recall denominator; they still "
      "count for file-level matching."),
+    ("Head-file line counts were fetched live only for paths the ensemble+judge verdict needed, so "
+     "seat arms may keep an out-of-hunk citation as unverified where the full arm would drop it; "
+     "seat-arm fabrication rates are therefore lower bounds."),
     ("Evaluation seat 2 is openai/gpt-5.4-mini (reasoning effort medium) instead of the production "
      "lineup's qwen/qwen3.8-max, which reasons without bound (~7 min and $0.10 per PR)."),
 )
@@ -127,12 +128,14 @@ def run_one(row: Row, config: Config, provider: Provider, run_dir: Path, prompts
         shutil.rmtree(inst)
     inst.mkdir(parents=True, exist_ok=True)
     recorder = Recorder(inst)
-    reviewer = recording_reviewer(provider.seat_models, provider.make_reviewer_model_fn, recorder, prompts_dir)
+    usage = _usage_source(provider.box)
+    reviewer = recording_reviewer(provider.seat_models, provider.make_reviewer_model_fn, recorder,
+                                  prompts_dir, usage)
     enrichment = Enrichment(
-        model_fn=recording_model_fn("aux", AUX_MODEL, provider.aux_fn, recorder),
+        model_fn=recording_model_fn("aux", AUX_MODEL, provider.aux_fn, recorder, usage),
         prompts_dir=prompts_dir,
-        skeptic_fn=recording_model_fn("skeptic", SKEPTIC_MODEL, provider.skeptic_fn, recorder),
-        judge_fn=recording_model_fn("judge", JUDGE_MODEL, provider.judge_fn, recorder),
+        skeptic_fn=recording_model_fn("skeptic", SKEPTIC_MODEL, provider.skeptic_fn, recorder, usage),
+        judge_fn=recording_model_fn("judge", JUDGE_MODEL, provider.judge_fn, recorder, usage),
     )
     runner = corpus_runner(row, fallback_runner, HeadFileStore(inst / arms_mod.HEAD_FILES))
     started, spent_before = time.monotonic(), provider.box.meter.spent_usd
@@ -156,78 +159,39 @@ def run_one(row: Row, config: Config, provider: Provider, run_dir: Path, prompts
     return result
 
 
+def _usage_source(box: MeterBox) -> Callable[[], tuple[int, int]]:
+    """The tokens of the call that just returned. `prime_model_fn` parks each
+    response's usage on the box, so the recorder can attribute it without the
+    provider and the recorder having to know about each other."""
+    def source() -> tuple[int, int]:
+        usage: Usage | None = box.last_usage
+        return (usage.prompt_tokens, usage.completion_tokens) if usage else (0, 0)
+    return source
+
+
 def _verdict_json(verdict: Verdict) -> dict:
     return json.loads(json.dumps(asdict(verdict), default=str))
-
-
-def _pr_for(row: Row) -> github.PullRequest:
-    return github._parse_pr_list(pr_list_json(row))[0]
 
 
 def score_run(run_dir: Path, prompts_dir: Path) -> dict:
     rows = {r.instance_id: r for r in parse_rows(json.loads((run_dir / "rows.json").read_text(encoding="utf-8")))}
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
-    acc = _Accumulator()
+    seat_models = tuple(config.get("seats") or SEATS)
+    pricing, notes = load_pricing(run_dir)
+    acc = Accumulator()
     done_dirs = sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name in rows and is_done(p))
     for inst in done_dirs:
-        _score_instance_dir(inst, rows[inst.name], prompts_dir, acc)
-    aggregates = [aggregate(arm, mode, scores, acc.fabricated.get((arm, mode), 0))
-                  for (arm, mode), scores in acc.per_arm.items()]
-    summary = {"run_id": config.get("run_id"), "config": config, "instances": len(done_dirs),
-               "aggregates": [asdict(a) for a in aggregates], "severity": acc.severity, "drift": acc.drift,
-               "replay_misses": acc.misses, "cost_usd": acc.cost, "seconds": acc.seconds,
+        score_instance_dir(inst, rows[inst.name], prompts_dir, acc, seat_models, pricing)
+    summary = {"run_id": config.get("run_id"), "config": config, "instances": acc.instances,
+               "aggregates": [asdict(a) for a in build_aggregates(acc)], "severity": acc.severity,
+               "drift": acc.drift, "replay_misses": acc.excluded["replay_miss"],
+               "cost_usd": acc.cost, "seconds": acc.seconds,
+               "pricing": {m: list(r) for m, r in pricing.items()},
+               "per_instance": acc.per_instance, "excluded": acc.excluded,
+               "arm_notes": acc.arm_notes, "notes": notes,
                "limitations": list(LIMITATIONS)}
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     return summary
-
-
-class _Accumulator:
-    def __init__(self) -> None:
-        self.per_arm: dict[tuple[str, str], list] = {}
-        self.fabricated: dict[tuple[str, str], int] = {}
-        self.severity: dict[str, list[int]] = {}
-        self.drift = self.misses = 0
-        self.cost = self.seconds = 0.0
-
-
-def _score_instance_dir(inst: Path, row: Row, prompts_dir: Path, acc: _Accumulator) -> None:
-    outcome = json.loads((inst / "outcome.json").read_text(encoding="utf-8"))
-    acc.cost += outcome.get("cost_usd", 0.0)
-    acc.seconds += outcome.get("seconds", 0.0)
-    pr, refs = _pr_for(row), row.reference_comments
-    for arm in arms_mod.ARMS:
-        built = arms_mod.build_arm(arm, inst, pr, row.patch, LANE_OPEN, prompts_dir)
-        acc.misses += built.replay_miss
-        if built.verdict is None:
-            continue
-        # Fabrication is a property of citation validation, so it only ever
-        # applies to the "on" row -- the raw "off" row was never validated and
-        # must not inherit a rate that describes a pass it didn't run.
-        acc.per_arm.setdefault((arm, "off"), []).append(score_instance(built.verdict, refs))
-        validated, dropped = arms_mod.apply_citations(built.verdict, row.patch, inst, row.repo, row.head_sha)
-        total_dropped = built.dropped + dropped
-        acc.fabricated[(arm, "on")] = acc.fabricated.get((arm, "on"), 0) + total_dropped
-        acc.per_arm.setdefault((arm, "on"), []).append(score_instance(validated, refs, total_dropped))
-        if arm == "full":
-            acc.drift += _drifted(outcome.get("verdict"), built.verdict)
-            for f in validated.introduces:
-                if not f.refuted:
-                    bucket = acc.severity.setdefault(str(f.severity.value), [0, 0])
-                    bucket[0] += 1
-                    bucket[1] += any(match(f, r) for r in refs)
-
-
-def _drifted(live: dict | None, replayed: Verdict) -> int:
-    if live is None:
-        return 1
-
-    def key(items):
-        return sorted(
-            (str(i.get("file")), i.get("line") if i.get("line") is not None else -1, str(i.get("claim")))
-            for i in items
-        )
-
-    return int(key(live.get("introduces", [])) != key([asdict(f) for f in replayed.introduces]))
 
 
 def write_report(run_dir: Path, out_dir: Path) -> Path:
@@ -235,7 +199,9 @@ def write_report(run_dir: Path, out_dir: Path) -> Path:
     aggs = [Aggregate(**a) for a in summary["aggregates"]]
     sev = [(k, v[0], v[1]) for k, v in sorted(summary["severity"].items())]
     md = render_markdown(summary["run_id"], summary["config"], aggs, sev, summary["limitations"],
-                         summary["cost_usd"], summary["seconds"], summary["drift"], summary["replay_misses"])
+                         summary["cost_usd"], summary["seconds"], summary["drift"],
+                         summary["replay_misses"], summary["instances"],
+                         filters=summary["config"].get("filters"), excluded=summary.get("excluded"))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{summary['run_id']}.md"
     path.write_text(md, encoding="utf-8")
@@ -260,17 +226,38 @@ def _row_raw(row: Row) -> dict:
                                            "text": c.text, "diff_hunk": ""} for c in row.reference_comments]}
 
 
+def instance_dirs(run_dir: Path) -> tuple[Path, ...]:
+    """Directories a previous `run` left behind for this run-id."""
+    if not run_dir.is_dir():
+        return ()
+    return tuple(p for p in sorted(run_dir.iterdir())
+                 if p.is_dir() and ((p / "calls").is_dir() or (p / "outcome.json").is_file()))
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     run_id = args.run_id or datetime.now(UTC).strftime("%Y%m%d-%H%M")
     run_dir = EVAL_ROOT / "runs" / run_id
+    existing = instance_dirs(run_dir)
+    if existing and not args.resume:
+        # Silently continuing would mix a new sample (or new seats) into an
+        # existing run's recordings, and the scorer cannot tell them apart.
+        print(f"run-id {run_id!r} already has {len(existing)} instance(s); "
+              f"pass --resume to continue it, or choose another --run-id")
+        return 2
     run_dir.mkdir(parents=True, exist_ok=True)
-    rows = select(fetch_rows(EVAL_ROOT / "corpus" / "swecare-test.json", _fetch_page), args.count, args.seed)
+    rows, filters = select_with_counts(
+        fetch_rows(EVAL_ROOT / "corpus" / "swecare-test.json", _fetch_page), args.count, args.seed)
     (run_dir / "rows.json").write_text(json.dumps({"rows": [{"row": _row_raw(r)} for r in rows]}), encoding="utf-8")
     (run_dir / "config.json").write_text(json.dumps({"run_id": run_id, "count": args.count, "seed": args.seed,
                                                      "cap_usd": args.cap_usd, "seats": SEATS,
-                                                     "seat_options": SEAT_OPTIONS}), encoding="utf-8")
+                                                     "seat_options": SEAT_OPTIONS,
+                                                     "filters": filters}), encoding="utf-8")
     client = make_client(resolve_prime_key())
     pricing = fetch_pricing(client, [*SEATS, AUX_MODEL, SKEPTIC_MODEL, JUDGE_MODEL])
+    # The scorer prices the recorded calls against this snapshot, so it has to
+    # be the prices this run actually paid, not whatever /models says later.
+    (run_dir / "pricing.json").write_text(
+        json.dumps({m: list(r) for m, r in pricing.items()}, indent=1), encoding="utf-8")
     meter_path = run_dir / "meter.json"
     if meter_path.is_file():
         # `--cap-usd` always wins, even on resume: a cap raised (or lowered)
@@ -306,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--seed", type=int, default=0)
     run.add_argument("--cap-usd", type=float, default=40.0)
     run.add_argument("--run-id", default="")
+    run.add_argument("--resume", action="store_true",
+                     help="continue an existing run-id instead of refusing to reuse it")
     run.set_defaults(fn=cmd_run)
     score = sub.add_parser("score")
     score.add_argument("--run-id", required=True)

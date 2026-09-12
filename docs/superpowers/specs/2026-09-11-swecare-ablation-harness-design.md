@@ -109,7 +109,7 @@ blast `deepseek/deepseek-v4-flash`; skeptic and judge `deepseek/deepseek-v4-pro`
 | `pr diff …` | `patch_to_review` verbatim |
 | `pr checks …` | `"[]"` (CI unknown) |
 | `api …/issues/…/comments` | `"[]"` |
-| `api …/contents/<path>?ref=<sha>` | delegated to `fallback` (real `gh`) so citation validation gets exact head line counts; a failure degrades to unverified, as in production. Every response (or failure) is appended to the instance's `head_counts.json` as `{path: line_count | null}` so the offline `citations=on` arm replays it without network |
+| `api …/contents/<path>?ref=<sha>` | delegated to `fallback` (real `gh`) so citation validation gets exact head line counts; a failure degrades to unverified, as in production. Every response (or failure) is appended to the instance's `head_files.json` as `{path: raw gh content response | null}` so the offline `citations=on` arm replays it without network |
 | anything else | `GitHubError("eval runner: unexpected gh call: …")` |
 
 The runner is pure over `row` apart from that one append, and logs nothing.
@@ -118,8 +118,8 @@ The runner is pure over `row` apart from that one append, and logs nothing.
 
 - `Recorder(dir: Path)` writes `calls/<seq:03d>-<role>.json` with
   `{role, model, prompt_sha256, prompt, response, prompt_tokens,
-  completion_tokens, seconds}`. Roles: `seat`, `intent`, `blast`, `judge`,
-  `skeptic`.
+  completion_tokens, seconds}`. Roles: `seat`, `aux` (the intent pass; the
+  blast-radius walk is skipped in the diff-only harness), `judge`, `skeptic`.
 - `recording_reviewer(seat_models: Sequence[str], make_model_fn, recorder) -> Reviewer`:
   the ensemble calls the reviewer `size` times per PR; calls are assigned to
   seats round-robin in order (call k → `seat_models[k % len]`), so seat identity
@@ -146,7 +146,7 @@ All arms consume one instance directory and return a `Verdict`.
 
 Each arm is scored twice: `citations=off` (verdict as produced) and
 `citations=on` (`validate_citations` applied with head line counts recorded
-during the live run in `head_counts.json`). Production order is validation
+during the live run in `head_files.json`). Production order is validation
 before refutation; for the offline ladder validation is applied last so the
 `off` variant measures the raw fabrication rate. The report states this.
 

@@ -50,13 +50,37 @@ def parse_rows(payload: dict) -> tuple[Row, ...]:
 def select(
     rows: tuple[Row, ...], count: int, seed: int, max_patch_bytes: int = DEFAULT_MAX_PATCH_BYTES
 ) -> tuple[Row, ...]:
-    eligible = [
-        r for r in rows
-        if r.language == "Python" and len(r.patch.encode("utf-8")) <= max_patch_bytes and r.scorable
-    ]
+    eligible = _eligible(rows, max_patch_bytes)
     if len(eligible) <= count:
         return tuple(eligible)
     return tuple(random.Random(seed).sample(eligible, count))
+
+
+def select_with_counts(
+    rows: tuple[Row, ...], count: int, seed: int, max_patch_bytes: int = DEFAULT_MAX_PATCH_BYTES
+) -> tuple[tuple[Row, ...], dict[str, int]]:
+    """`select` plus how many rows each filter removed, so the run's config can
+    record what the corpus looked like before sampling."""
+    python = [r for r in rows if r.language == "Python"]
+    sized = [r for r in python if len(r.patch.encode("utf-8")) <= max_patch_bytes]
+    eligible = _eligible(rows, max_patch_bytes)
+    selected = select(rows, count, seed, max_patch_bytes)
+    counts = {
+        "total": len(rows),
+        "not_python": len(rows) - len(python),
+        "oversize": len(python) - len(sized),
+        "unscorable": len(sized) - len(eligible),
+        "eligible": len(eligible),
+        "selected": len(selected),
+    }
+    return selected, counts
+
+
+def _eligible(rows: tuple[Row, ...], max_patch_bytes: int) -> list[Row]:
+    return [
+        r for r in rows
+        if r.language == "Python" and len(r.patch.encode("utf-8")) <= max_patch_bytes and r.scorable
+    ]
 
 
 def fetch_rows(cache: Path, fetch_page: FetchPage, split: str = "test") -> tuple[Row, ...]:
