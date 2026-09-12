@@ -88,3 +88,18 @@ def test_apply_citations_uses_recorded_head_files(recorded):
     v = replace(live, introduces=(*live.introduces, bad))
     kept, dropped = apply_citations(v, DIFF, d, "o/r", "abc")
     assert dropped == 1 and all(f.line != 99 for f in kept.introduces)
+
+
+def test_full_arm_reports_skeptic_replay_miss(recorded):
+    d, _ = recorded
+    for p in (d / "calls").glob("*-skeptic.json"):
+        p.unlink()
+    r = build_arm("full", d, make_pr(), DIFF, "open", PROMPTS)
+    assert r.replay_miss and r.verdict is None
+
+
+def test_build_arm_reports_missing_prompt_file_as_error(recorded, tmp_path_factory):
+    d, _ = recorded
+    empty_prompts = tmp_path_factory.mktemp("empty")
+    r = build_arm("full", d, make_pr(), DIFF, "open", empty_prompts)
+    assert r.verdict is None and not r.replay_miss and r.error
