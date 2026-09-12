@@ -134,6 +134,11 @@ class ReviewConfig:
     # of two 1/N duplicates. Merge-only, same-file-only; a judge failure falls
     # back to deterministic grouping.
     judge_merge: bool = True
+    # Citation validation (P14, deterministic half): drop findings citing a
+    # file/line that does not exist in the diff (or, beyond the file's exact
+    # length, fetched at the PR head). Runs before every other post-processing
+    # pass — the go-live gate is zero fabricated findings.
+    validate_citations: bool = True
 
 
 @dataclass(frozen=True)
@@ -221,6 +226,7 @@ def _build_config(raw: dict) -> Config:
             min_agreement=int(review.get("min_agreement", 2)),
             check_refute=bool(review.get("check_refute", True)),
             judge_merge=bool(review.get("judge_merge", True)),
+            validate_citations=bool(review.get("validate_citations", True)),
             docs_globs=tuple(
                 review.get("docs_globs", ("**/*.md", "**/*.rst", "**/*.txt", "docs/**"))
             ),

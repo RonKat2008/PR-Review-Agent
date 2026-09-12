@@ -22,6 +22,7 @@ from . import github
 from . import graph as graph_mod
 from .analysis import AnalysisResult
 from .blast import analyze_blast_radius, extract_changed_symbols
+from .citations import head_line_counts, paths_needing_head_counts, validate_citations
 from .config import Config
 from .context import GitRunner
 from .diffs import filter_diff, split_by_file
@@ -220,6 +221,13 @@ def _review_one(
     except Exception as exc:  # noqa: BLE001 - a subagent may fail in any manner
         return PullRequestOutcome(pr=pr, lane=lane, error=f"reviewer failed: {exc}"), budget
 
+    # Citation validation runs first: no intent/blast/skeptic tokens should be
+    # spent on a finding that cites a file or line that does not exist.
+    verdict, citation_notes = _validate_citations(
+        config, filtered.text, verdict, repo_slug, pr.head_sha, runner
+    )
+    notes += citation_notes
+
     verdict, scope_notes = _attach_scope(config, pr, filtered.text, verdict, enrichment)
     notes += scope_notes
 
@@ -411,6 +419,34 @@ def _judge_fn(config: Config, enrichment: Enrichment | None) -> ModelFn | None:
     if enrichment is None or not config.review.judge_merge:
         return None
     return enrichment.judge_fn or enrichment.model_fn
+
+
+def _validate_citations(
+    config: Config,
+    diff: str,
+    verdict: Verdict,
+    repo_slug: str,
+    head_sha: str,
+    runner: github.GhRunner,
+) -> tuple[Verdict, tuple[str, ...]]:
+    """Drop findings citing a file/line that does not exist (go-live gate: zero
+    fabricated findings). Pure and deterministic — no model call, so it always
+    runs. Covers only `verdict.introduces`; scope/blast/files citations are
+    produced later and are not validated here. An exact head-SHA line count is
+    fetched, at the PR head, only for files with a finding whose line falls
+    outside the diff's commentable lines — the common path (every citation
+    verifiable straight from the diff) makes zero API calls, and never fails
+    the review.
+    """
+    if not config.review.validate_citations or not verdict.introduces:
+        return verdict, ()
+
+    repo_root = config.review.repo_root or None
+    needed = paths_needing_head_counts(verdict.introduces, diff, repo_root)
+    counts = head_line_counts(repo_slug, head_sha, needed, runner) if needed else {}
+
+    kept, notes = validate_citations(verdict.introduces, diff, counts, repo_root)
+    return replace(verdict, introduces=kept), notes
 
 
 def _apply_refutation(

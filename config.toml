@@ -144,6 +144,12 @@ check_refute = true
 # same-file-only, falls back to deterministic grouping on any failure.
 judge_merge = true
 
+# --- Citation validation (P14, deterministic half) ----------------------------
+# Drop findings citing a file/line that does not exist in the diff (or, beyond
+# the file's exact length, fetched at the PR head). Runs before every other
+# post-processing pass — the go-live gate is zero fabricated findings.
+validate_citations = true
+
 # --- Intent alignment (P8) --------------------------------------------------
 # Two-pass check: does the diff do what the PR says it does? Pass 1 derives the
 # intent from title/body/commits with the diff withheld; pass 2 judges the diff

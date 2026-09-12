@@ -274,7 +274,7 @@ def _gather_changed_files(
     fetched = [
         ChangedFile(path=path, content=content)
         for path in paths
-        for content in (_fetch_file_content(repo_slug, head_sha, path, runner),)
+        for content in (fetch_file_content(repo_slug, head_sha, path, runner),)
         if content is not None
     ]
 
@@ -347,7 +347,7 @@ def _build_excerpt(
     return "\n".join(parts)
 
 
-def _fetch_file_content(
+def fetch_file_content(
     repo_slug: str, head_sha: str, path: str, runner: GhRunner
 ) -> str | None:
     """Full file content at the PR head SHA. `None` means unavailable — that is normal."""

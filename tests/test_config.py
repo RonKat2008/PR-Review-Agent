@@ -11,6 +11,7 @@ from prime_pr_review.config import (
     ConfigError,
     RepoConfig,
     RepoEntry,
+    _build_config,
     load_config,
     require_repo,
     require_secrets,
@@ -90,6 +91,13 @@ def test_applies_defaults_for_omitted_values(tmp_path):
     assert config.review.max_comments_per_sweep == 5
     assert config.sinks.webhook_kind == "slack"
     assert config.review.max_diff_bytes == 200_000
+
+
+def test_validate_citations_defaults_true_and_parses_from_toml():
+    assert _build_config({}).review.validate_citations is True
+
+    built = _build_config({"review": {"validate_citations": False}})
+    assert built.review.validate_citations is False
 
 
 def test_shipped_config_is_valid():
