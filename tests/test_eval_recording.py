@@ -44,6 +44,19 @@ def test_replay_model_fn_hits_by_prompt_hash_and_misses_loudly(tmp_path):
         replay("a different prompt")
 
 
+def test_replay_model_fn_serves_duplicate_prompts_in_order(tmp_path):
+    rec = Recorder(tmp_path)
+    fn = recording_model_fn("skeptic", "m/a", lambda p: "first", rec)
+    fn("same prompt")
+    fn2 = recording_model_fn("skeptic", "m/a", lambda p: "second", rec)
+    fn2("same prompt")
+    replay = replay_model_fn(Recorder(tmp_path), "skeptic")
+    assert replay("same prompt") == "first"
+    assert replay("same prompt") == "second"
+    with pytest.raises(ReplayMiss):
+        replay("same prompt")
+
+
 def test_replay_reviewer_returns_seats_in_order(tmp_path):
     (tmp_path / "open_pr.md").write_text("T", encoding="utf-8")
     rec = Recorder(tmp_path)

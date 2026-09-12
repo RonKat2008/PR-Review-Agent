@@ -83,13 +83,15 @@ def recording_reviewer(seat_models: Sequence[str], make_model_fn: Callable[[str]
 
 
 def replay_model_fn(recorder: Recorder, role: str) -> ModelFn:
-    by_hash = {c.prompt_sha256: c.response for c in recorder.calls(role)}
+    by_hash: dict[str, list[str]] = {}
+    for c in recorder.calls(role):
+        by_hash.setdefault(c.prompt_sha256, []).append(c.response)
 
     def model_fn(prompt: str) -> str:
-        try:
-            return by_hash[sha256(prompt)]
-        except KeyError as exc:
-            raise ReplayMiss(f"no recorded {role} response for this prompt") from exc
+        pending = by_hash.get(sha256(prompt))
+        if not pending:
+            raise ReplayMiss(f"no recorded {role} response for this prompt")
+        return pending.pop(0)
     return model_fn
 
 
