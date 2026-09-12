@@ -33,7 +33,21 @@ Pricing = Mapping[str, tuple[float, float]]  # model -> (usd per M input tok, us
 
 
 class ProviderError(RuntimeError):
-    """The provider returned something unusable, or configuration is missing."""
+    """The provider returned something unusable, or configuration is missing.
+
+    `usage` carries the token spend of the call that failed, when the 200
+    payload reported one, so a caller that meters spend can record it even
+    though the call produced no usable text."""
+
+    def __init__(self, message: str, usage: Usage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
+
+
+class TruncatedResponse(ProviderError):
+    """The provider stopped at the completion cap (`finish_reason == "length"`).
+    The request is deterministic (temperature 0, fixed max_tokens), so retrying
+    would just reproduce the same truncation five times over, unmetered."""
 
 
 class BudgetExceeded(RuntimeError):
@@ -138,6 +152,10 @@ def chat(client: httpx.Client, model: str, prompt: str,
                 # not a verdict -- retry it on the same backoff as a 503.
                 try:
                     return _extract(response.json())
+                except TruncatedResponse:
+                    # Deterministic truncation: retrying is pointless and just
+                    # burns four more unmetered attempts, so raise right away.
+                    raise
                 except (ProviderError, json.JSONDecodeError) as exc:
                     last = str(exc)
             else:
@@ -157,9 +175,11 @@ def _extract(payload: dict) -> tuple[str, Usage]:
         if content is None or not str(content).strip():
             finish_reason = choice.get("finish_reason")
             reasoning_chars = len(message.get("reasoning") or "")
-            raise ProviderError(
-                f"empty content (finish_reason={finish_reason}, reasoning_chars={reasoning_chars})"
-            )
+            raw_usage = payload.get("usage") or {}
+            usage = Usage(int(raw_usage.get("prompt_tokens", 0)), int(raw_usage.get("completion_tokens", 0)))
+            text_msg = f"empty content (finish_reason={finish_reason}, reasoning_chars={reasoning_chars})"
+            error_cls = TruncatedResponse if finish_reason == "length" else ProviderError
+            raise error_cls(text_msg, usage=usage)
         text = str(content)
         usage = payload.get("usage") or {}
         return text, Usage(int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)))
@@ -170,7 +190,15 @@ def _extract(payload: dict) -> tuple[str, Usage]:
 def prime_model_fn(client: httpx.Client, model: str, box: MeterBox,
                    extra: Mapping[str, object] | None = None) -> ModelFn:
     def model_fn(prompt: str) -> str:
-        text, usage = chat(client, model, prompt, extra=extra)
+        try:
+            text, usage = chat(client, model, prompt, extra=extra)
+        except ProviderError as exc:
+            # Even a failed call may have burned tokens (a truncated or
+            # empty-content 200 still carries `usage`); meter it before the
+            # caller's cap check sees the failure.
+            if exc.usage is not None:
+                box.meter = box.meter.record(model, exc.usage)
+            raise
         box.meter = box.meter.record(model, usage)
         box.last_usage = usage
         return text

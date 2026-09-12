@@ -13,6 +13,7 @@ from prime_pr_review.providers import (
     CostMeter,
     MeterBox,
     ProviderError,
+    TruncatedResponse,
     Usage,
     chat,
     fetch_pricing,
@@ -85,9 +86,9 @@ def test_chat_raises_on_null_content_with_finish_reason_length():
             "choices": [{"message": {"content": None, "reasoning": "x" * 10}, "finish_reason": "length"}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 16_000},
         })
-    with pytest.raises(ProviderError, match="finish_reason=length"):
+    with pytest.raises(TruncatedResponse, match="finish_reason=length"):
         chat(_client(handler), "m/a", "p", sleep=lambda s: None)
-    assert len(calls) == MAX_ATTEMPTS
+    assert len(calls) == 1
 
 
 def test_chat_raises_on_whitespace_only_content():
@@ -98,7 +99,20 @@ def test_chat_raises_on_whitespace_only_content():
             "choices": [{"message": {"content": "   ", "reasoning": "y" * 3}, "finish_reason": "length"}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 16_000},
         })
-    with pytest.raises(ProviderError, match="finish_reason=length"):
+    with pytest.raises(TruncatedResponse, match="finish_reason=length"):
+        chat(_client(handler), "m/a", "p", sleep=lambda s: None)
+    assert len(calls) == 1
+
+
+def test_chat_retries_empty_content_with_finish_reason_stop_until_max_attempts():
+    calls = []
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "", "reasoning": ""}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 0},
+        })
+    with pytest.raises(ProviderError):
         chat(_client(handler), "m/a", "p", sleep=lambda s: None)
     assert len(calls) == MAX_ATTEMPTS
 
@@ -184,6 +198,19 @@ def test_model_fn_records_last_usage_on_box():
     fn = prime_model_fn(_client(lambda r: _ok("x", 11, 22)), "m/a", box)
     fn("p")
     assert box.last_usage == Usage(11, 22)
+
+
+def test_model_fn_records_spend_on_truncated_response():
+    box = MeterBox(CostMeter(cap_usd=10, pricing=PRICING))
+    def handler(req):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": None, "reasoning": ""}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 16_000},
+        })
+    fn = prime_model_fn(_client(handler), "m/a", box)
+    with pytest.raises(TruncatedResponse):
+        fn("p")
+    assert box.meter.spent_usd == pytest.approx(100 * 2.0 / 1e6 + 16_000 * 4.0 / 1e6)
 
 
 def test_chat_merges_extra_into_body():

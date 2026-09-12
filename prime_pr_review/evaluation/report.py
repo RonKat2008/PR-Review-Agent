@@ -55,11 +55,19 @@ def _ladder(aggregates: Sequence[Aggregate]) -> list[str]:
 
 
 def _exclusions(excluded: Mapping[str, int] | None) -> list[str]:
-    """Say what the metrics were *not* computed over: an instance an arm could
-    not be rebuilt for, or one with no line-anchored ground truth, is absent
-    from every number above."""
-    counted = [f"{key} {n}" for key, n in (excluded or {}).items() if n]
-    if not counted:
-        return []
-    return [(f"Instances excluded from the metrics above ({', '.join(counted)}); "
-             "see `excluded` and `per_instance` in the run's summary.json.")]
+    """Say what the metrics were *not* computed over, in the units each count
+    actually is: a PR with no line-anchored ground truth is excluded once,
+    from every arm; an arm that could not be rebuilt for one PR excludes only
+    that arm-instance pair, and the same PR counts again for a second arm that
+    also failed to build. Either sentence is dropped when its counts are zero."""
+    excluded = excluded or {}
+    no_anchored_refs = excluded.get("no_anchored_refs", 0)
+    replay_miss = excluded.get("replay_miss", 0)
+    error = excluded.get("error", 0)
+    lines = []
+    if no_anchored_refs:
+        lines.append(f"PRs excluded from every arm: no line-anchored reference comments {no_anchored_refs}.")
+    if replay_miss or error:
+        lines.append(f"Arm-instance pairs excluded: replay_miss {replay_miss}, error {error} "
+                     "(each PR counts once per affected arm).")
+    return lines

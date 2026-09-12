@@ -53,11 +53,31 @@ def test_corpus_line_reports_the_filter_counts():
     assert "Corpus:" in md and "500" in md and "not Python 300" in md and "eligible 150" in md
 
 
-def test_exclusions_become_a_limitation_bullet():
+def test_no_anchored_refs_becomes_a_pr_exclusion_bullet():
+    md = _render(excluded={"replay_miss": 0, "error": 0, "no_anchored_refs": 5})
+    bullets = [line for line in md.splitlines() if "excluded" in line.lower()]
+    assert len(bullets) == 1
+    assert "PRs excluded from every arm" in bullets[0]
+    assert "no line-anchored reference comments 5" in bullets[0]
+
+
+def test_replay_miss_and_error_become_an_arm_instance_exclusion_bullet():
+    md = _render(excluded={"replay_miss": 2, "error": 3, "no_anchored_refs": 0})
+    bullets = [line for line in md.splitlines() if "excluded" in line.lower()]
+    assert len(bullets) == 1
+    assert "Arm-instance pairs excluded" in bullets[0]
+    assert "replay_miss 2" in bullets[0] and "error 3" in bullets[0]
+    assert "each PR counts once per affected arm" in bullets[0]
+
+
+def test_both_exclusion_bullets_present_when_all_counts_are_nonzero():
     md = _render(excluded={"replay_miss": 2, "error": 0, "no_anchored_refs": 5})
-    bullet = next(line for line in md.splitlines() if "excluded" in line.lower())
-    assert "replay_miss 2" in bullet and "no_anchored_refs 5" in bullet
-    assert "error" not in bullet  # zero counts are not worth a line
+    bullets = [line for line in md.splitlines() if "excluded" in line.lower()]
+    assert len(bullets) == 2
+    pr_bullet = next(b for b in bullets if "PRs excluded from every arm" in b)
+    pair_bullet = next(b for b in bullets if "Arm-instance pairs excluded" in b)
+    assert "no line-anchored reference comments 5" in pr_bullet
+    assert "replay_miss 2" in pair_bullet and "error 0" in pair_bullet
 
 
 def test_no_exclusions_adds_no_bullet():
