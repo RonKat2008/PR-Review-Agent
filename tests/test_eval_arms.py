@@ -103,3 +103,23 @@ def test_build_arm_reports_missing_prompt_file_as_error(recorded, tmp_path_facto
     empty_prompts = tmp_path_factory.mktemp("empty")
     r = build_arm("full", d, make_pr(), DIFF, "open", empty_prompts)
     assert r.verdict is None and not r.replay_miss and r.error
+
+
+def test_full_arm_validates_citations_before_refuting(recorded):
+    """A dropped (fabricated-file) finding must never reach the skeptic: its
+    prompt was never recorded, so refuting it first would raise ReplayMiss and
+    lose the whole instance. Replace seat 1's recorded response with a single
+    fabricated-file finding (on a distinct file, so no judge merge is needed
+    and the surviving `a.py` finding's skeptic prompt is unchanged from what
+    the fixture already recorded)."""
+    d, _ = recorded
+    seat_files = sorted((d / "calls").glob("*-seat.json"))
+    payload = json.loads(seat_files[1].read_text())
+    payload["response"] = json.dumps({
+        "introduces": [{"file": "nope.py", "line": 1, "severity": "HIGH",
+                        "claim": "fabricated", "evidence": "e"}],
+        "fixes": [], "confidence": 0.9,
+    })
+    seat_files[1].write_text(json.dumps(payload))
+    r = build_arm("full", d, make_pr(), DIFF, "open", PROMPTS)
+    assert r.verdict is not None and not r.replay_miss and r.dropped == 1

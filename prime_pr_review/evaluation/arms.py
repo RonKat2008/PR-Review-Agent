@@ -5,6 +5,7 @@ ensemble+judge -> full (plus skeptic; refuted findings count as not reported).
 The live run *is* `full`; the scorer checks the replayed `full` matches it."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from .runner import HeadFileStore, replay_runner
 ARMS = ("seat-1", "seat-2", "seat-3", "ensemble", "ensemble+judge", "full")
 HEAD_FILES = "head_files.json"
 JUDGED_ARMS = frozenset({"ensemble+judge", "full"})
+_PR_URL_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/\d+$")
 
 
 @dataclass(frozen=True)
@@ -28,26 +30,27 @@ class ArmResult:
     notes: tuple[str, ...] = ()
     replay_miss: bool = False
     error: str = ""
+    dropped: int = 0
 
 
 def build_arm(arm: str, instance_dir: Path, pr: PullRequest, diff: str, lane: str,
               prompts_dir: Path | str) -> ArmResult:
     recorder = Recorder(instance_dir)
     try:
-        verdict, notes = _build(arm, recorder, pr, diff, lane, prompts_dir)
+        verdict, notes, dropped = _build(arm, recorder, instance_dir, pr, diff, lane, prompts_dir)
     except ReplayMiss as exc:
         return ArmResult(arm, None, replay_miss=True, error=str(exc))
-    except (VerdictError, IndexError, RefuteError, OSError) as exc:
+    except (VerdictError, IndexError, RefuteError, OSError, ValueError) as exc:
         return ArmResult(arm, None, error=str(exc))
-    return ArmResult(arm, verdict, notes)
+    return ArmResult(arm, verdict, notes, dropped=dropped)
 
 
-def _build(arm, recorder, pr, diff, lane, prompts_dir) -> tuple[Verdict, tuple[str, ...]]:
+def _build(arm, recorder, instance_dir, pr, diff, lane, prompts_dir) -> tuple[Verdict, tuple[str, ...], int]:
     if arm.startswith("seat-"):
         seats = recorder.calls("seat")
         if not seats:
             raise ReplayMiss("no recorded seats")
-        return parse_verdict(seats[int(arm[5:]) - 1].response), ()
+        return parse_verdict(seats[int(arm[5:]) - 1].response), (), 0
     if not recorder.calls("seat"):
         raise ReplayMiss("no recorded seats")
     judge = replay_model_fn(recorder, "judge") if arm in JUDGED_ARMS else None
@@ -56,9 +59,23 @@ def _build(arm, recorder, pr, diff, lane, prompts_dir) -> tuple[Verdict, tuple[s
         judge_fn=judge, prompts_dir=prompts_dir,
     )
     if arm != "full":
-        return verdict, notes
-    findings, refute_notes = _refute(verdict.introduces, diff, recorder, prompts_dir)
-    return replace(verdict, introduces=findings), notes + refute_notes
+        return verdict, notes, 0
+    # Production order is validate-then-refute (sweep.py runs citation validation
+    # before the skeptic pass). Refuting first would send a skeptic prompt for a
+    # fabricated finding that citation validation would have dropped -- a prompt
+    # that was never recorded live, so replay would raise ReplayMiss and lose the
+    # whole instance for exactly the PRs with fabrications.
+    validated, dropped = apply_citations(verdict, diff, instance_dir, _slug_from_url(pr.url), pr.head_sha)
+    findings, refute_notes = _refute(validated.introduces, diff, recorder, prompts_dir)
+    return replace(validated, introduces=findings), notes + refute_notes, dropped
+
+
+def _slug_from_url(url: str) -> str:
+    """`https://github.com/{owner}/{name}/pull/{number}` -> `owner/name`."""
+    match = _PR_URL_RE.match(url)
+    if match is None:
+        raise ValueError(f"cannot parse repo slug from PR url: {url!r}")
+    return f"{match.group(1)}/{match.group(2)}"
 
 
 def _refute(introduces, diff, recorder, prompts_dir):

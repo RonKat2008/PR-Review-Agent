@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -72,7 +73,8 @@ LIMITATIONS = (
     "Ground truth is human review comments; a real defect humans did not comment on counts against precision.",
     "Intent pass sees the PR title only (PullRequest carries no body/commits in the headless path).",
     "SWE-CARE contains no cosmetic/silent PRs, so the silence rate is not measured.",
-    "Offline ladder applies citation validation after refutation; production applies it before.",
+    ("The full arm replays production order (citation validation, then refutation); the other arms "
+     "are scored raw and again with validation applied afterwards."),
     ("Reference comments without a line number are excluded from the recall denominator; they still "
      "count for file-level matching."),
 )
@@ -115,6 +117,11 @@ def run_one(row: Row, config: Config, provider: Provider, run_dir: Path, prompts
     inst = run_dir / row.instance_id
     if is_done(inst):
         return {"instance_id": row.instance_id, "skipped": True, "error": None}
+    if inst.exists():
+        # A directory without a `done` marker is a partial/interrupted attempt
+        # (or, in a resumed run, stale from a prior interpreter version) --
+        # never resume into it, or the new recordings mix with the old ones.
+        shutil.rmtree(inst)
     inst.mkdir(parents=True, exist_ok=True)
     recorder = Recorder(inst)
     reviewer = recording_reviewer(provider.seat_models, provider.make_reviewer_model_fn, recorder, prompts_dir)
@@ -138,7 +145,11 @@ def run_one(row: Row, config: Config, provider: Provider, run_dir: Path, prompts
         "cost_usd": provider.box.meter.spent_usd - spent_before,
     }
     (inst / "outcome.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
-    mark_done(inst)
+    # Only a clean outcome earns the `done` marker -- an errored attempt must be
+    # retried (with its stale recordings cleared, see above), never treated as
+    # finished.
+    if result["error"] is None:
+        mark_done(inst)
     return result
 
 
@@ -157,7 +168,7 @@ def score_run(run_dir: Path, prompts_dir: Path) -> dict:
     done_dirs = sorted(p for p in run_dir.iterdir() if p.is_dir() and p.name in rows and is_done(p))
     for inst in done_dirs:
         _score_instance_dir(inst, rows[inst.name], prompts_dir, acc)
-    aggregates = [aggregate(arm, mode, scores, acc.fabricated.get(arm, 0))
+    aggregates = [aggregate(arm, mode, scores, acc.fabricated.get((arm, mode), 0))
                   for (arm, mode), scores in acc.per_arm.items()]
     summary = {"run_id": config.get("run_id"), "config": config, "instances": len(done_dirs),
                "aggregates": [asdict(a) for a in aggregates], "severity": acc.severity, "drift": acc.drift,
@@ -170,7 +181,7 @@ def score_run(run_dir: Path, prompts_dir: Path) -> dict:
 class _Accumulator:
     def __init__(self) -> None:
         self.per_arm: dict[tuple[str, str], list] = {}
-        self.fabricated: dict[str, int] = {}
+        self.fabricated: dict[tuple[str, str], int] = {}
         self.severity: dict[str, list[int]] = {}
         self.drift = self.misses = 0
         self.cost = self.seconds = 0.0
@@ -186,10 +197,14 @@ def _score_instance_dir(inst: Path, row: Row, prompts_dir: Path, acc: _Accumulat
         acc.misses += built.replay_miss
         if built.verdict is None:
             continue
+        # Fabrication is a property of citation validation, so it only ever
+        # applies to the "on" row -- the raw "off" row was never validated and
+        # must not inherit a rate that describes a pass it didn't run.
         acc.per_arm.setdefault((arm, "off"), []).append(score_instance(built.verdict, refs))
         validated, dropped = arms_mod.apply_citations(built.verdict, row.patch, inst, row.repo, row.head_sha)
-        acc.fabricated[arm] = acc.fabricated.get(arm, 0) + dropped
-        acc.per_arm.setdefault((arm, "on"), []).append(score_instance(validated, refs, dropped))
+        total_dropped = built.dropped + dropped
+        acc.fabricated[(arm, "on")] = acc.fabricated.get((arm, "on"), 0) + total_dropped
+        acc.per_arm.setdefault((arm, "on"), []).append(score_instance(validated, refs, total_dropped))
         if arm == "full":
             acc.drift += _drifted(outcome.get("verdict"), built.verdict)
             for f in validated.introduces:
@@ -204,7 +219,10 @@ def _drifted(live: dict | None, replayed: Verdict) -> int:
         return 1
 
     def key(items):
-        return sorted((str(i.get("file")), i.get("line"), str(i.get("claim"))) for i in items)
+        return sorted(
+            (str(i.get("file")), i.get("line") if i.get("line") is not None else -1, str(i.get("claim")))
+            for i in items
+        )
 
     return int(key(live.get("introduces", [])) != key([asdict(f) for f in replayed.introduces]))
 
@@ -250,8 +268,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     client = make_client(resolve_prime_key())
     pricing = fetch_pricing(client, [*SEATS, AUX_MODEL, SKEPTIC_MODEL, JUDGE_MODEL])
     meter_path = run_dir / "meter.json"
-    meter = (CostMeter.from_json(meter_path.read_text(encoding="utf-8"), pricing) if meter_path.is_file()
-             else CostMeter(cap_usd=args.cap_usd, pricing=pricing))
+    if meter_path.is_file():
+        # `--cap-usd` always wins, even on resume: a cap raised (or lowered)
+        # between invocations must take effect immediately, not stay pinned to
+        # whatever was persisted the first time this run-id was started.
+        loaded = CostMeter.from_json(meter_path.read_text(encoding="utf-8"), pricing)
+        meter = replace(loaded, cap_usd=args.cap_usd)
+    else:
+        meter = CostMeter(cap_usd=args.cap_usd, pricing=pricing)
     provider = build_provider(client, MeterBox(meter))
     base = load_config(AGENT_ROOT / "config.toml")
     for i, row in enumerate(rows, 1):
