@@ -42,3 +42,7 @@ nul
 
 # Subagent verdict/payload handoff files (runtime)
 state/verdicts/
+
+# Evaluation harness runtime artifacts (results are committed under docs/eval/)
+eval/corpus/
+eval/runs/

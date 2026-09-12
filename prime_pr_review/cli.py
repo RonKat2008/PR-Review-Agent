@@ -30,6 +30,7 @@ _SCRIPT_FOR = {
     "replay": "replay_corpus",
     "score": "score_demo",
     "cochange": "build_cochange",
+    "eval": "eval_swecare",
 }
 
 _USAGE = """prime-review <command> [options]
@@ -41,6 +42,7 @@ commands:
   score                score the demo answer key   (scripts/score_demo.py)
   check                preflight config/secrets/gh (python -m prime_pr_review)
   cochange             mine a co-change graph      (scripts/build_cochange.py)
+  eval run|score|report   SWE-CARE ablation harness (docs/superpowers/specs/2026-09-11-swecare-ablation-harness-design.md)
 
 Every command accepts its script's own flags; --config and --reviews-dir
 default to the agent's own files regardless of the current directory.
