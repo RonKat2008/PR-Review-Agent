@@ -8,6 +8,7 @@ import pytest
 from prime_pr_review.providers import (
     BASE_URL,
     MAX_ATTEMPTS,
+    MAX_COMPLETION_TOKENS,
     BudgetExceeded,
     CostMeter,
     MeterBox,
@@ -73,6 +74,33 @@ def test_chat_retries_429_then_succeeds():
     assert text == "done" and usage == Usage(100, 50)
     assert seen[0]["model"] == "m/a" and seen[0]["messages"][0]["content"] == "prompt"
     assert seen[0]["temperature"] == 0
+    assert seen[0]["max_tokens"] == MAX_COMPLETION_TOKENS
+
+
+def test_chat_raises_on_null_content_with_finish_reason_length():
+    calls = []
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": None, "reasoning": "x" * 10}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 16_000},
+        })
+    with pytest.raises(ProviderError, match="finish_reason=length"):
+        chat(_client(handler), "m/a", "p", sleep=lambda s: None)
+    assert len(calls) == 1
+
+
+def test_chat_raises_on_whitespace_only_content():
+    calls = []
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "   ", "reasoning": "y" * 3}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 16_000},
+        })
+    with pytest.raises(ProviderError, match="finish_reason=length"):
+        chat(_client(handler), "m/a", "p", sleep=lambda s: None)
+    assert len(calls) == 1
 
 
 def test_chat_gives_up_after_max_attempts():

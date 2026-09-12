@@ -24,6 +24,7 @@ DEFAULT_CONFIG_PATH = Path.home() / ".prime" / "config.json"
 REQUEST_TIMEOUT_SECONDS = 300
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 2.0
+MAX_COMPLETION_TOKENS = 16_000
 RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 ModelFn = Callable[[str], str]
@@ -117,7 +118,8 @@ def fetch_pricing(client: httpx.Client, models: Sequence[str]) -> dict[str, tupl
 
 def chat(client: httpx.Client, model: str, prompt: str,
          sleep: Callable[[float], None] = time.sleep) -> tuple[str, Usage]:
-    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0}
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0,
+            "max_tokens": MAX_COMPLETION_TOKENS}
     last = "no attempts"
     for attempt in range(MAX_ATTEMPTS):
         try:
@@ -137,7 +139,16 @@ def chat(client: httpx.Client, model: str, prompt: str,
 
 def _extract(payload: dict) -> tuple[str, Usage]:
     try:
-        text = str(payload["choices"][0]["message"]["content"])
+        choice = payload["choices"][0]
+        message = choice["message"]
+        content = message["content"]
+        if content is None or not str(content).strip():
+            finish_reason = choice.get("finish_reason")
+            reasoning_chars = len(message.get("reasoning") or "")
+            raise ProviderError(
+                f"empty content (finish_reason={finish_reason}, reasoning_chars={reasoning_chars})"
+            )
+        text = str(content)
         usage = payload.get("usage") or {}
         return text, Usage(int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)))
     except (KeyError, IndexError, TypeError) as exc:
