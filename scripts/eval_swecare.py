@@ -35,6 +35,7 @@ from prime_pr_review.evaluation.recording import (
     recording_model_fn,
     recording_reviewer,
 )
+from prime_pr_review.evaluation.repair import repair_run
 from prime_pr_review.evaluation.report import render_markdown
 from prime_pr_review.evaluation.runner import HeadFileStore, corpus_runner
 from prime_pr_review.evaluation.scorer import (
@@ -61,7 +62,16 @@ from prime_pr_review.sweep import Enrichment, sweep_lane
 DATASET_URL = "https://datasets-server.huggingface.co/rows"
 DATASET = "inclusionAI/SWE-CARE"
 SEATS = ("deepseek/deepseek-v4-pro", "openai/gpt-5.4-mini", "z-ai/glm-5.2")
-SEAT_OPTIONS: dict[str, dict] = {"openai/gpt-5.4-mini": {"reasoning": {"effort": "medium"}}}
+DEEPSEEK_V4_PRO_MAX_TOKENS = 64_000
+SEAT_OPTIONS: dict[str, dict] = {
+    "openai/gpt-5.4-mini": {"reasoning": {"effort": "medium"}},
+    # 40/111 live instances lost their deepseek/deepseek-v4-pro seat to the
+    # default 16k MAX_COMPLETION_TOKENS cap (long reasoning, skewed to larger
+    # patches; no call came near the 300s timeout) -- TruncatedResponse is
+    # deliberately not retried (see providers.TruncatedResponse), so the fix
+    # is a bigger per-model cap, not a retry.
+    "deepseek/deepseek-v4-pro": {"max_tokens": DEEPSEEK_V4_PRO_MAX_TOKENS},
+}
 AUX_MODEL = "deepseek/deepseek-v4-flash"
 SKEPTIC_MODEL = JUDGE_MODEL = "deepseek/deepseek-v4-pro"
 PROMPTS_DIR = AGENT_ROOT / "skills" / "pr-review" / "prompts"
@@ -98,8 +108,8 @@ def build_provider(client: httpx.Client, box: MeterBox) -> Provider:
     return Provider(
         make_reviewer_model_fn=lambda model: prime_model_fn(client, model, box, extra=SEAT_OPTIONS.get(model)),
         aux_fn=prime_model_fn(client, AUX_MODEL, box),
-        skeptic_fn=prime_model_fn(client, SKEPTIC_MODEL, box),
-        judge_fn=prime_model_fn(client, JUDGE_MODEL, box),
+        skeptic_fn=prime_model_fn(client, SKEPTIC_MODEL, box, extra=SEAT_OPTIONS.get(SKEPTIC_MODEL)),
+        judge_fn=prime_model_fn(client, JUDGE_MODEL, box, extra=SEAT_OPTIONS.get(JUDGE_MODEL)),
         box=box,
     )
 
@@ -234,16 +244,56 @@ def instance_dirs(run_dir: Path) -> tuple[Path, ...]:
                  if p.is_dir() and ((p / "calls").is_dir() or (p / "outcome.json").is_file()))
 
 
+def _run_seat_models(run_dir: Path) -> tuple[str, ...]:
+    """The seat lineup a run was actually started with, so a repair issues
+    calls against the same models the run's live recordings used even if
+    `SEATS` has moved on since. Falls back to today's `SEATS` when the run
+    predates the config, or has none yet (nothing to repair either way)."""
+    config_path = run_dir / "config.json"
+    if not config_path.is_file():
+        return SEATS
+    return tuple(json.loads(config_path.read_text(encoding="utf-8")).get("seats") or SEATS)
+
+
+def _cmd_repair(run_dir: Path, cap_usd: float) -> int:
+    """`run --repair`: re-issue only the seat calls missing from this run's
+    `done` instances. Never writes rows.json/config.json (the run already
+    has them) and never calls `run_one` -- see `repair_run`."""
+    client = make_client(resolve_prime_key())
+    pricing = fetch_pricing(client, [*SEATS, AUX_MODEL, SKEPTIC_MODEL, JUDGE_MODEL])
+    meter_path = run_dir / "meter.json"
+    if meter_path.is_file():
+        loaded = CostMeter.from_json(meter_path.read_text(encoding="utf-8"), pricing)
+        meter = replace(loaded, cap_usd=cap_usd)
+    else:
+        meter = CostMeter(cap_usd=cap_usd, pricing=pricing)
+    provider = build_provider(client, MeterBox(meter))
+    provider = replace(provider, seat_models=_run_seat_models(run_dir))
+    try:
+        counts = repair_run(run_dir, provider)
+    except BudgetExceeded as exc:
+        print(f"stopping: {exc}")
+        return 3
+    print(f"repair: {counts['repaired']}/{counts['instances']} instances repaired, "
+          f"{counts['calls']} calls, {counts['unrepairable']} unrepairable")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     run_id = args.run_id or datetime.now(UTC).strftime("%Y%m%d-%H%M")
     run_dir = EVAL_ROOT / "runs" / run_id
     existing = instance_dirs(run_dir)
-    if existing and not args.resume:
+    if existing and not (args.resume or args.repair):
         # Silently continuing would mix a new sample (or new seats) into an
         # existing run's recordings, and the scorer cannot tell them apart.
         print(f"run-id {run_id!r} already has {len(existing)} instance(s); "
               f"pass --resume to continue it, or choose another --run-id")
         return 2
+    if args.repair:
+        # --repair implies --resume semantics for the check above (an
+        # existing run is the whole point) but must never fall through into
+        # the normal review loop below.
+        return _cmd_repair(run_dir, args.cap_usd)
     run_dir.mkdir(parents=True, exist_ok=True)
     rows, filters = select_with_counts(
         fetch_rows(EVAL_ROOT / "corpus" / "swecare-test.json", _fetch_page), args.count, args.seed)
@@ -269,6 +319,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         meter = CostMeter(cap_usd=args.cap_usd, pricing=pricing)
     provider = build_provider(client, MeterBox(meter))
     base = load_config(AGENT_ROOT / "config.toml")
+    return _run_review_loop(rows, base, provider, run_dir, meter_path)
+
+
+def _run_review_loop(rows: list[Row], base: Config, provider: Provider, run_dir: Path,
+                     meter_path: Path) -> int:
     for i, row in enumerate(rows, 1):
         try:
             result = run_one(row, eval_config(base, row), provider, run_dir, PROMPTS_DIR)
@@ -295,6 +350,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--run-id", default="")
     run.add_argument("--resume", action="store_true",
                      help="continue an existing run-id instead of refusing to reuse it")
+    run.add_argument("--repair", action="store_true",
+                     help="re-issue only missing seat calls for this run-id's done instances, "
+                          "instead of running the normal review loop")
     run.set_defaults(fn=cmd_run)
     score = sub.add_parser("score")
     score.add_argument("--run-id", required=True)

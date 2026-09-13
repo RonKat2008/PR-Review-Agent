@@ -8,7 +8,19 @@ from pathlib import Path
 import httpx
 
 from prime_pr_review.evaluation.corpus import parse_rows
-from prime_pr_review.providers import BASE_URL, CostMeter, MeterBox, Usage
+from prime_pr_review.evaluation.recording import (
+    Recorder,
+    is_done,
+    mark_done,
+    recording_model_fn,
+)
+from prime_pr_review.providers import (
+    BASE_URL,
+    MAX_COMPLETION_TOKENS,
+    CostMeter,
+    MeterBox,
+    Usage,
+)
 
 from .conftest import make_config
 
@@ -91,6 +103,35 @@ def test_build_provider_forwards_seat_options_for_gpt_5_4_mini():
     assert "reasoning" not in seen[-1]
 
 
+def test_build_provider_caps_deepseek_seat_skeptic_and_judge_at_64k():
+    mod = _load()
+    assert mod.SEAT_OPTIONS["deepseek/deepseek-v4-pro"] == {"max_tokens": 64_000}
+    assert mod.SEAT_OPTIONS["openai/gpt-5.4-mini"] == {"reasoning": {"effort": "medium"}}
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "v"}}],
+                                         "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url=BASE_URL)
+    pricing = {m: (1.0, 1.0) for m in mod.SEATS}
+    box = MeterBox(CostMeter(cap_usd=10, pricing=pricing))
+    provider = mod.build_provider(client, box)
+
+    provider.make_reviewer_model_fn("deepseek/deepseek-v4-pro")("p")
+    assert seen[-1]["max_tokens"] == 64_000
+
+    provider.make_reviewer_model_fn("z-ai/glm-5.2")("p")
+    assert seen[-1]["max_tokens"] == MAX_COMPLETION_TOKENS
+
+    provider.skeptic_fn("p")
+    assert seen[-1]["max_tokens"] == 64_000
+
+    provider.judge_fn("p")
+    assert seen[-1]["max_tokens"] == 64_000
+
+
 def test_run_one_writes_layout_and_is_resumable(tmp_path):
     mod = _load()
     (row, *_) = parse_rows(json.loads(FIXTURE.read_text()))
@@ -161,6 +202,74 @@ def test_fabrication_rate_only_applies_to_on_row(tmp_path):
     off_row = next(a for a in summary["aggregates"] if a["arm"] == "ensemble" and a["mode"] == "off")
     assert on_row["fabrication_rate"] == 0.5
     assert off_row["fabrication_rate"] is None
+
+
+def _repair_provider(mod, pricing=None):
+    pricing = pricing or {m: (1.0, 1.0) for m in ("m/a", "m/b", "m/c")}
+    box = MeterBox(CostMeter(cap_usd=10, pricing=pricing))
+    return mod.Provider(make_reviewer_model_fn=lambda model: (lambda p: f"resp-{model}"),
+                        aux_fn=lambda p: "", skeptic_fn=lambda p: "", judge_fn=lambda p: "",
+                        box=box, seat_models=("m/a", "m/b", "m/c"))
+
+
+def test_repair_run_reissues_only_the_missing_seat(tmp_path):
+    mod = _load()
+    run_dir = tmp_path / "run"
+    inst = run_dir / "inst-0"
+    rec = Recorder(inst)
+    recording_model_fn("seat", "m/b", lambda p, o="out-b": o, rec)("shared prompt")
+    recording_model_fn("seat", "m/c", lambda p, o="out-c": o, rec)("shared prompt")
+    mark_done(inst)
+
+    counts = mod.repair_run(run_dir, _repair_provider(mod))
+
+    seat_files = sorted((inst / "calls").glob("*-seat.json"))
+    assert len(seat_files) == 3
+    new_files = [p for p in seat_files if json.loads(p.read_text())["model"] == "m/a"]
+    assert len(new_files) == 1
+    assert json.loads(new_files[0].read_text())["prompt"] == "shared prompt"
+    assert is_done(inst)
+    assert counts == {"instances": 1, "repaired": 1, "calls": 1, "unrepairable": 0}
+
+
+def test_repair_run_leaves_a_fully_recorded_instance_untouched(tmp_path):
+    mod = _load()
+    run_dir = tmp_path / "run"
+    inst = run_dir / "inst-0"
+    rec = Recorder(inst)
+    for model in ("m/a", "m/b", "m/c"):
+        recording_model_fn("seat", model, lambda p, o=f"out-{model}": o, rec)("shared prompt")
+    mark_done(inst)
+
+    counts = mod.repair_run(run_dir, _repair_provider(mod))
+
+    assert len(list((inst / "calls").glob("*-seat.json"))) == 3
+    assert counts == {"instances": 1, "repaired": 0, "calls": 0, "unrepairable": 0}
+
+
+def test_repair_run_counts_an_instance_with_no_seat_files_as_unrepairable(tmp_path):
+    mod = _load()
+    run_dir = tmp_path / "run"
+    inst = run_dir / "inst-0"
+    inst.mkdir(parents=True)
+    mark_done(inst)
+
+    counts = mod.repair_run(run_dir, _repair_provider(mod))
+
+    assert counts == {"instances": 1, "repaired": 0, "calls": 0, "unrepairable": 1}
+    assert not list((inst / "calls").glob("*.json"))
+
+
+def test_run_repair_flag_skips_the_normal_loop_and_never_calls_run_one(tmp_path, monkeypatch):
+    mod = _load()
+    _monkeypatch_run(mod, tmp_path, monkeypatch)
+
+    def boom(*_a, **_k):
+        raise AssertionError("run_one must not be called in --repair mode")
+
+    monkeypatch.setattr(mod, "run_one", boom)
+    exit_code = mod.main(["run", "--run-id", "t", "--repair"])
+    assert exit_code == 0
 
 
 def test_cmd_run_stops_on_budget_and_persists_meter(tmp_path, monkeypatch):

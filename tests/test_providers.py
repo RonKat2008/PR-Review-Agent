@@ -229,6 +229,17 @@ def test_chat_merges_extra_into_body():
     assert body["max_tokens"] == MAX_COMPLETION_TOKENS
 
 
+def test_chat_extra_max_tokens_overrides_default():
+    seen = []
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return _ok("done")
+    text, _ = chat(_client(handler), "m/a", "p", sleep=lambda s: None, extra={"max_tokens": 64_000})
+    assert text == "done"
+    assert seen[0]["max_tokens"] == 64_000
+    assert seen[0]["max_tokens"] != MAX_COMPLETION_TOKENS
+
+
 def test_chat_without_extra_omits_key():
     seen = []
     def handler(req):
