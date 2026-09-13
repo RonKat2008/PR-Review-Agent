@@ -249,6 +249,36 @@ def test_chat_without_extra_omits_key():
     assert "reasoning" not in seen[0]
 
 
+def test_chat_extra_timeout_sets_per_request_timeout_and_is_stripped_from_body():
+    seen_bodies = []
+    seen_timeouts = []
+    def handler(req):
+        seen_bodies.append(json.loads(req.content))
+        seen_timeouts.append(req.extensions["timeout"])
+        return _ok("done")
+    text, _ = chat(_client(handler), "m/a", "p", sleep=lambda s: None, extra={"_timeout": 900})
+    assert text == "done"
+    assert "_timeout" not in seen_bodies[0]
+    assert seen_timeouts[0]["read"] == 900
+
+
+def test_chat_without_timeout_key_leaves_body_and_default_timeout_unchanged():
+    seen_bodies = []
+    seen_timeouts = []
+    def handler(req):
+        seen_bodies.append(json.loads(req.content))
+        seen_timeouts.append(req.extensions["timeout"])
+        return _ok("done")
+    text, _ = chat(_client(handler), "m/a", "p", sleep=lambda s: None,
+                   extra={"reasoning": {"effort": "medium"}})
+    assert text == "done"
+    assert "_timeout" not in seen_bodies[0]
+    assert seen_bodies[0]["reasoning"] == {"effort": "medium"}
+    # No per-request timeout override was requested, so httpx falls back to
+    # the client's own default (5s for a bare httpx.Client()).
+    assert seen_timeouts[0]["read"] == 5.0
+
+
 def test_model_fn_forwards_extra_into_posted_body():
     seen = []
     def handler(req):

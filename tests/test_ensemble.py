@@ -272,6 +272,26 @@ def test_one_run_producing_an_unparsable_response_is_tolerated_when_others_agree
     assert verdict.confidence == 2 / 3
 
 
+def test_a_failed_run_is_noted_in_the_returned_notes_when_others_agree():
+    # Arrange: the second of three runs raises; the other two agree.
+    reviewer = scripted_reviewer(
+        _raw(introduces=[_finding()]),
+        RuntimeError("subagent timed out"),
+        _raw(introduces=[_finding()]),
+    )
+
+    # Act
+    verdict, notes = ensemble_review_detailed(
+        make_pr(), PAYLOAD, LANE, reviewer, size=3, min_agreement=2
+    )
+
+    # Assert: the run still fails tolerantly (existing behavior), but the
+    # failure is now surfaced in the notes instead of vanishing silently.
+    assert len(verdict.introduces) == 1
+    assert any("reviewer run 2/3 failed" in note for note in notes)
+    assert any("RuntimeError" in note for note in notes)
+
+
 def test_all_runs_failing_raises_verdict_error_naming_the_failure_count():
     # Arrange
     reviewer = scripted_reviewer(

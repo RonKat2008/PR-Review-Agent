@@ -105,12 +105,14 @@ def test_build_provider_forwards_seat_options_for_gpt_5_4_mini():
 
 def test_build_provider_caps_deepseek_seat_skeptic_and_judge_at_64k():
     mod = _load()
-    assert mod.SEAT_OPTIONS["deepseek/deepseek-v4-pro"] == {"max_tokens": 64_000}
+    assert mod.SEAT_OPTIONS["deepseek/deepseek-v4-pro"] == {"max_tokens": 64_000, "_timeout": 900}
     assert mod.SEAT_OPTIONS["openai/gpt-5.4-mini"] == {"reasoning": {"effort": "medium"}}
     seen = []
+    timeouts = []
 
     def handler(req):
         seen.append(json.loads(req.content))
+        timeouts.append(req.extensions["timeout"])
         return httpx.Response(200, json={"choices": [{"message": {"content": "v"}}],
                                          "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
 
@@ -121,15 +123,20 @@ def test_build_provider_caps_deepseek_seat_skeptic_and_judge_at_64k():
 
     provider.make_reviewer_model_fn("deepseek/deepseek-v4-pro")("p")
     assert seen[-1]["max_tokens"] == 64_000
+    assert "_timeout" not in seen[-1]
+    assert timeouts[-1]["read"] == 900
 
     provider.make_reviewer_model_fn("z-ai/glm-5.2")("p")
     assert seen[-1]["max_tokens"] == MAX_COMPLETION_TOKENS
+    assert timeouts[-1]["read"] != 900
 
     provider.skeptic_fn("p")
     assert seen[-1]["max_tokens"] == 64_000
+    assert timeouts[-1]["read"] == 900
 
     provider.judge_fn("p")
     assert seen[-1]["max_tokens"] == 64_000
+    assert timeouts[-1]["read"] == 900
 
 
 def test_run_one_writes_layout_and_is_resumable(tmp_path):

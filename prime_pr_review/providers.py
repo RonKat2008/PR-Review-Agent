@@ -137,12 +137,16 @@ def chat(client: httpx.Client, model: str, prompt: str,
          extra: Mapping[str, object] | None = None) -> tuple[str, Usage]:
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0,
             "max_tokens": MAX_COMPLETION_TOKENS}
+    timeout: float | None = None
     if extra:
-        body = {**body, **extra}
+        rest = dict(extra)
+        timeout = rest.pop("_timeout", None)  # type: ignore[assignment]
+        body = {**body, **rest}
+    post_kwargs = {"timeout": timeout} if timeout is not None else {}
     last = "no attempts"
     for attempt in range(MAX_ATTEMPTS):
         try:
-            response = client.post("/chat/completions", json=body)
+            response = client.post("/chat/completions", json=body, **post_kwargs)
         except httpx.HTTPError as exc:
             last = repr(exc)
         else:

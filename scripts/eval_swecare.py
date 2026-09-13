@@ -70,7 +70,13 @@ SEAT_OPTIONS: dict[str, dict] = {
     # patches; no call came near the 300s timeout) -- TruncatedResponse is
     # deliberately not retried (see providers.TruncatedResponse), so the fix
     # is a bigger per-model cap, not a retry.
-    "deepseek/deepseek-v4-pro": {"max_tokens": DEEPSEEK_V4_PRO_MAX_TOKENS},
+    # With the cap raised to 64k, the model now reasons long enough on large
+    # patches to exceed the 300s client default -- `chat` retries a plain
+    # timeout up to MAX_ATTEMPTS times (~26 min wasted per PR) and the seat
+    # is lost anyway. `_timeout` (a reserved providers.chat extra key, see
+    # providers.REQUEST_TIMEOUT_SECONDS) raises the per-request read timeout
+    # for this seat only, without touching the API body.
+    "deepseek/deepseek-v4-pro": {"max_tokens": DEEPSEEK_V4_PRO_MAX_TOKENS, "_timeout": 900},
 }
 AUX_MODEL = "deepseek/deepseek-v4-flash"
 SKEPTIC_MODEL = JUDGE_MODEL = "deepseek/deepseek-v4-pro"

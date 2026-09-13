@@ -85,8 +85,9 @@ def ensemble_review_detailed(
 ) -> tuple[Verdict, tuple[str, ...]]:
     """Run `reviewer` against the same `(pr, payload, lane)` `size` times and
     merge the results into one Verdict via observed agreement, not any single
-    run's self-reported confidence. Returns the verdict plus activity notes
-    (currently only the judge-merge pass emits any).
+    run's self-reported confidence. Returns the verdict plus activity notes:
+    one per failed reviewer run (`_collect_runs`), plus any the judge-merge
+    pass emits.
 
     With `judge_fn` set, the P15 judge-merge pass runs between deterministic
     grouping and the `min_agreement` filter: a model proposes which same-file
@@ -103,8 +104,8 @@ def ensemble_review_detailed(
 
     For `size > 1`:
       1. Each run is parsed independently (`_collect_runs`); a run that raises
-         or fails to parse as a Verdict is recorded and skipped. If every run
-         fails, raises `VerdictError` naming how many did.
+         or fails to parse as a Verdict is recorded, noted, and skipped. If
+         every run fails, raises `VerdictError` naming how many did.
       2. `introduces` findings are matched across runs on `(file, line //
          LINE_BUCKET, severity)` and kept when at least `min_agreement`
          distinct runs reported the same key (`_group_findings`).
@@ -132,16 +133,17 @@ def ensemble_review_detailed(
     if size == 1:
         return parse_verdict(reviewer(pr, payload, lane)), ()
 
-    runs, failures = _collect_runs(pr, payload, lane, reviewer, size)
+    runs, failure_notes = _collect_runs(pr, payload, lane, reviewer, size)
     if not runs:
         raise VerdictError(
-            f"All {failures}/{size} ensemble reviewer runs failed to produce a usable verdict"
+            f"All {len(failure_notes)}/{size} ensemble reviewer runs failed to produce a usable verdict"
         )
 
     groups = _group_findings(runs)
-    notes: tuple[str, ...] = ()
+    notes: tuple[str, ...] = failure_notes
     if judge_fn is not None:
-        groups, notes = _judge_merge(groups, judge_fn, prompts_dir)
+        groups, judge_notes = _judge_merge(groups, judge_fn, prompts_dir)
+        notes = notes + judge_notes
     survivors = tuple(group for group in groups if group.matches >= min_agreement)
     first = runs[0]
 
@@ -159,23 +161,28 @@ def ensemble_review_detailed(
 
 def _collect_runs(
     pr: PullRequest, payload: str, lane: str, reviewer: Reviewer, size: int
-) -> tuple[tuple[Verdict, ...], int]:
+) -> tuple[tuple[Verdict, ...], tuple[str, ...]]:
     """Call `reviewer` `size` times and parse each response into a Verdict.
 
     A run can fail two ways: the call itself raises -- a subagent can fail in
     any manner, a timeout or a transport error included -- or it returns text
     `parse_verdict` cannot use (`VerdictError`). Both are recorded as a
     failure and skipped; one bad call must not sink a review the other runs
-    completed successfully.
+    completed successfully. Each failure also gets a note (`"ensemble:
+    reviewer run k/size failed: ..."`) so a run silently going missing shows
+    up in the review's notes instead of only being inferable from a lower
+    agreement ratio.
     """
     runs: list[Verdict] = []
-    failures = 0
-    for _ in range(size):
+    notes: list[str] = []
+    for k in range(size):
         try:
             runs.append(parse_verdict(reviewer(pr, payload, lane)))
-        except Exception:  # noqa: BLE001 - a subagent run may fail in any manner
-            failures += 1
-    return tuple(runs), failures
+        except Exception as exc:  # noqa: BLE001 - a subagent run may fail in any manner
+            notes.append(
+                f"ensemble: reviewer run {k + 1}/{size} failed: {type(exc).__name__}: {str(exc)[:120]}"
+            )
+    return tuple(runs), tuple(notes)
 
 
 @dataclass(frozen=True)
