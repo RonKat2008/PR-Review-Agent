@@ -35,13 +35,14 @@ from prime_pr_review.evaluation.recording import (
     recording_model_fn,
     recording_reviewer,
 )
-from prime_pr_review.evaluation.repair import repair_run
+from prime_pr_review.evaluation.repair import repair_passes, repair_run
 from prime_pr_review.evaluation.report import render_markdown
 from prime_pr_review.evaluation.runner import HeadFileStore, corpus_runner
 from prime_pr_review.evaluation.scorer import (
     Accumulator,
     build_aggregates,
     load_pricing,
+    pr_for_row,
     score_instance_dir,
 )
 from prime_pr_review.evaluation.scoring import Aggregate
@@ -97,6 +98,9 @@ LIMITATIONS = (
      "seat-arm fabrication rates are therefore lower bounds."),
     ("Evaluation seat 2 is openai/gpt-5.4-mini (reasoning effort medium) instead of the production "
      "lineup's qwen/qwen3.8-max, which reasons without bound (~7 min and $0.10 per PR)."),
+    ("Instances repaired after the live run (missing seats re-issued) had their judge and skeptic "
+     "calls re-issued offline against the rebuilt verdict; those calls are recorded and replayed "
+     "like live ones but were not part of the original review's wall time."),
 )
 
 
@@ -108,6 +112,10 @@ class Provider:
     judge_fn: Callable[[str], str]
     box: MeterBox
     seat_models: tuple[str, ...] = SEATS
+    # Carried on the provider so `repair_passes` can record a re-issued call
+    # under the model that actually served it, without importing this script.
+    judge_model: str = JUDGE_MODEL
+    skeptic_model: str = SKEPTIC_MODEL
 
 
 def build_provider(client: httpx.Client, box: MeterBox) -> Provider:
@@ -261,20 +269,42 @@ def _run_seat_models(run_dir: Path) -> tuple[str, ...]:
     return tuple(json.loads(config_path.read_text(encoding="utf-8")).get("seats") or SEATS)
 
 
+def _meter(run_dir: Path, pricing, cap_usd: float) -> CostMeter:
+    """This run's persisted spend, with `--cap-usd` always winning: a cap
+    raised (or lowered) between invocations must take effect immediately, not
+    stay pinned to whatever was persisted the first time this run-id ran."""
+    path = run_dir / "meter.json"
+    if not path.is_file():
+        return CostMeter(cap_usd=cap_usd, pricing=pricing)
+    return replace(CostMeter.from_json(path.read_text(encoding="utf-8"), pricing), cap_usd=cap_usd)
+
+
+def _repair_provider(run_dir: Path, cap_usd: float) -> Provider:
+    """A provider pinned to the seat lineup this run was started with, metered
+    against its persisted spend. Both repairs append to a finished run, so
+    they must bill and address it exactly as the original invocation did."""
+    client = make_client(resolve_prime_key())
+    pricing = fetch_pricing(client, [*SEATS, AUX_MODEL, SKEPTIC_MODEL, JUDGE_MODEL])
+    provider = build_provider(client, MeterBox(_meter(run_dir, pricing, cap_usd)))
+    return replace(provider, seat_models=_run_seat_models(run_dir))
+
+
+def _cmd_repairs(run_dir: Path, args: argparse.Namespace) -> int:
+    """Seats first when both flags are given: a repaired seat changes the
+    verdict the judge prompt is built from, so repairing passes before seats
+    would record a judge call for a prompt the next seat repair invalidates."""
+    if args.repair:
+        code = _cmd_repair(run_dir, args.cap_usd)
+        if code or not args.repair_passes:
+            return code
+    return _cmd_repair_passes(run_dir, args.cap_usd)
+
+
 def _cmd_repair(run_dir: Path, cap_usd: float) -> int:
     """`run --repair`: re-issue only the seat calls missing from this run's
     `done` instances. Never writes rows.json/config.json (the run already
     has them) and never calls `run_one` -- see `repair_run`."""
-    client = make_client(resolve_prime_key())
-    pricing = fetch_pricing(client, [*SEATS, AUX_MODEL, SKEPTIC_MODEL, JUDGE_MODEL])
-    meter_path = run_dir / "meter.json"
-    if meter_path.is_file():
-        loaded = CostMeter.from_json(meter_path.read_text(encoding="utf-8"), pricing)
-        meter = replace(loaded, cap_usd=cap_usd)
-    else:
-        meter = CostMeter(cap_usd=cap_usd, pricing=pricing)
-    provider = build_provider(client, MeterBox(meter))
-    provider = replace(provider, seat_models=_run_seat_models(run_dir))
+    provider = _repair_provider(run_dir, cap_usd)
     try:
         counts = repair_run(run_dir, provider)
     except BudgetExceeded as exc:
@@ -286,21 +316,43 @@ def _cmd_repair(run_dir: Path, cap_usd: float) -> int:
     return 0
 
 
+def _cmd_repair_passes(run_dir: Path, cap_usd: float) -> int:
+    """`run --repair-passes`: re-issue the judge and skeptic calls the rebuilt
+    verdict needs, for the instances whose judged arms no longer replay --
+    see `repair_passes`. Reads rows.json for the diff and PR each rebuild
+    needs; writes nothing but recordings and the meter."""
+    provider = _repair_provider(run_dir, cap_usd)
+    rows = {r.instance_id: r for r in
+            parse_rows(json.loads((run_dir / "rows.json").read_text(encoding="utf-8")))}
+    try:
+        counts = repair_passes(run_dir, provider, provider.seat_models, PROMPTS_DIR,
+                               lambda iid: rows[iid].patch, lambda iid: pr_for_row(rows[iid]))
+    except BudgetExceeded as exc:
+        print(f"stopping: {exc}")
+        return 3
+    finally:
+        (run_dir / "meter.json").write_text(provider.box.meter.to_json(), encoding="utf-8")
+    print(f"repair-passes: {counts['repaired']}/{counts['instances']} instances repaired, "
+          f"{counts['judge_calls']} judge call(s), {counts['skeptic_calls']} skeptic call(s), "
+          f"{counts['failed']} failed")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     run_id = args.run_id or datetime.now(UTC).strftime("%Y%m%d-%H%M")
     run_dir = EVAL_ROOT / "runs" / run_id
     existing = instance_dirs(run_dir)
-    if existing and not (args.resume or args.repair):
+    if existing and not (args.resume or args.repair or args.repair_passes):
         # Silently continuing would mix a new sample (or new seats) into an
         # existing run's recordings, and the scorer cannot tell them apart.
         print(f"run-id {run_id!r} already has {len(existing)} instance(s); "
               f"pass --resume to continue it, or choose another --run-id")
         return 2
-    if args.repair:
-        # --repair implies --resume semantics for the check above (an
+    if args.repair or args.repair_passes:
+        # Either repair implies --resume semantics for the check above (an
         # existing run is the whole point) but must never fall through into
         # the normal review loop below.
-        return _cmd_repair(run_dir, args.cap_usd)
+        return _cmd_repairs(run_dir, args)
     run_dir.mkdir(parents=True, exist_ok=True)
     rows, filters = select_with_counts(
         fetch_rows(EVAL_ROOT / "corpus" / "swecare-test.json", _fetch_page), args.count, args.seed)
@@ -316,15 +368,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     (run_dir / "pricing.json").write_text(
         json.dumps({m: list(r) for m, r in pricing.items()}, indent=1), encoding="utf-8")
     meter_path = run_dir / "meter.json"
-    if meter_path.is_file():
-        # `--cap-usd` always wins, even on resume: a cap raised (or lowered)
-        # between invocations must take effect immediately, not stay pinned to
-        # whatever was persisted the first time this run-id was started.
-        loaded = CostMeter.from_json(meter_path.read_text(encoding="utf-8"), pricing)
-        meter = replace(loaded, cap_usd=args.cap_usd)
-    else:
-        meter = CostMeter(cap_usd=args.cap_usd, pricing=pricing)
-    provider = build_provider(client, MeterBox(meter))
+    provider = build_provider(client, MeterBox(_meter(run_dir, pricing, args.cap_usd)))
     base = load_config(AGENT_ROOT / "config.toml")
     return _run_review_loop(rows, base, provider, run_dir, meter_path)
 
@@ -360,6 +404,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--repair", action="store_true",
                      help="re-issue only missing seat calls for this run-id's done instances, "
                           "instead of running the normal review loop")
+    run.add_argument("--repair-passes", action="store_true",
+                     help="re-issue the judge/skeptic calls this run-id's rebuilt verdicts need, "
+                          "instead of running the normal review loop; with --repair, seats first")
     run.set_defaults(fn=cmd_run)
     score = sub.add_parser("score")
     score.add_argument("--run-id", required=True)

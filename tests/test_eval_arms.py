@@ -194,3 +194,16 @@ def test_unparseable_seats_are_an_error_not_a_replay_miss(recorded):
         path.write_text(json.dumps(payload))
     r = build("ensemble", d)
     assert r.verdict is None and not r.replay_miss and r.error
+
+
+def test_judged_arms_report_a_missing_judge_recording(recorded):
+    """`_judge_merge` swallows every judge exception and falls back to the
+    deterministic grouping with a note, so a replay miss on the judge would
+    otherwise render as a silently un-judged `ensemble+judge` arm."""
+    d, _ = recorded
+    for p in (d / "calls").glob("*-judge.json"):
+        p.unlink()
+    for arm in ("ensemble+judge", "full"):
+        r = build(arm, d)
+        assert r.replay_miss and r.verdict is None, arm
+    assert build("ensemble", d).verdict is not None

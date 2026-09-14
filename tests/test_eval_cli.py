@@ -414,3 +414,44 @@ def test_summary_carries_pricing_per_instance_and_exclusions(tmp_path):
     assert any(a["arm"] == "single" for a in summary["aggregates"])
     md = mod.write_report(run_dir, tmp_path / "docs").read_text()
     assert f"Instances: {summary['instances']}" in md
+
+
+def _record_seats(inst, responses):
+    rec = Recorder(inst)
+    for response in responses:
+        recording_model_fn("seat", "m", lambda p, r=response: r, rec)("shared prompt")
+    mark_done(inst)
+
+
+def _two_finding_seats():
+    """Two same-file findings in different LINE_BUCKETs, so the rebuilt verdict
+    needs a judge call, plus a clean third seat."""
+    def verdict(*findings):
+        return json.dumps({"introduces": list(findings), "fixes": [], "confidence": 0.9})
+
+    def finding(line, claim):
+        return {"file": "a.py", "line": line, "severity": "HIGH", "claim": claim, "evidence": "e"}
+
+    return [verdict(finding(1, "bug one")), verdict(finding(7, "bug one again")), verdict()]
+
+
+def test_run_repair_passes_flag_reissues_judge_and_skeptic_without_run_one(tmp_path, monkeypatch):
+    mod = _load()
+    _monkeypatch_run(mod, tmp_path, monkeypatch)
+    run_dir = tmp_path / "runs" / "t"
+    run_dir.mkdir(parents=True)
+    (run_dir / "rows.json").write_text(json.dumps({"rows": [_mini_row_payload(0)]}))
+    (run_dir / "config.json").write_text(
+        json.dumps({"count": 1, "seed": 0, "run_id": "t", "seats": ["m", "m", "m"]}))
+    _record_seats(run_dir / "fake-0", _two_finding_seats())
+
+    def boom(*_a, **_k):
+        raise AssertionError("run_one must not be called in --repair-passes mode")
+
+    monkeypatch.setattr(mod, "run_one", boom)
+    assert mod.main(["run", "--run-id", "t", "--repair-passes"]) == 0
+
+    calls = run_dir / "fake-0" / "calls"
+    assert len(list(calls.glob("*-judge.json"))) == 1
+    assert list(calls.glob("*-skeptic.json"))
+    assert (run_dir / "meter.json").is_file()

@@ -17,6 +17,7 @@ from ..refute import RefuteError, refute_findings
 from ..review import Verdict, VerdictError, parse_verdict
 from .recording import (
     Call,
+    ModelFn,
     Recorder,
     ReplayMiss,
     replay_model_fn,
@@ -35,6 +36,18 @@ _PR_URL_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/\d+$")
 
 
 @dataclass(frozen=True)
+class LiveFallbacks:
+    """Model fns to fall back on when a replay misses, for `repair_passes`.
+
+    Empty (the default) everywhere else: scoring must never reach a model, so
+    a miss there stays a `replay_miss` on the arm. A fallback supplied here is
+    expected to record its own call, so the miss it answers does not recur."""
+
+    judge_fn: ModelFn | None = None
+    skeptic_fn: ModelFn | None = None
+
+
+@dataclass(frozen=True)
 class ArmResult:
     arm: str
     verdict: Verdict | None
@@ -45,11 +58,12 @@ class ArmResult:
 
 
 def build_arm(arm: str, instance_dir: Path, pr: PullRequest, diff: str, lane: str,
-              prompts_dir: Path | str, seat_models: Sequence[str]) -> ArmResult:
+              prompts_dir: Path | str, seat_models: Sequence[str],
+              live: LiveFallbacks | None = None) -> ArmResult:
     recorder = Recorder(instance_dir)
     try:
         verdict, notes, dropped = _build(arm, recorder, instance_dir, pr, diff, lane, prompts_dir,
-                                         seat_models)
+                                         seat_models, live)
     except ReplayMiss as exc:
         return ArmResult(arm, None, replay_miss=True, error=str(exc))
     except (VerdictError, IndexError, RefuteError, OSError, ValueError) as exc:
@@ -79,13 +93,13 @@ def arm_calls(recorder: Recorder, arm: str, seat_models: Sequence[str]) -> tuple
 
 
 def _build(arm, recorder, instance_dir, pr, diff, lane, prompts_dir,
-           seat_models) -> tuple[Verdict, tuple[str, ...], int]:
+           seat_models, live=None) -> tuple[Verdict, tuple[str, ...], int]:
     if arm.startswith("seat-"):
         call = seat_calls(recorder, seat_models)[int(arm[5:]) - 1]
         if call is None:
             raise ReplayMiss(f"no recorded call for {arm}")
         return parse_verdict(call.response), (), 0
-    verdict, notes = _ensemble(arm, recorder, pr, diff, lane, prompts_dir, seat_models)
+    verdict, notes = _ensemble(arm, recorder, pr, diff, lane, prompts_dir, seat_models, live)
     if arm != "full":
         return verdict, notes, 0
     # Production order is validate-then-refute (sweep.py runs citation validation
@@ -94,16 +108,23 @@ def _build(arm, recorder, instance_dir, pr, diff, lane, prompts_dir,
     # that was never recorded live, so replay would raise ReplayMiss and lose the
     # whole instance for exactly the PRs with fabrications.
     validated, dropped = apply_citations(verdict, diff, instance_dir, _slug_from_url(pr.url), pr.head_sha)
-    findings, refute_notes = _refute(validated.introduces, diff, recorder, prompts_dir)
+    findings, refute_notes = _refute(validated.introduces, diff, recorder, prompts_dir, live)
     return replace(validated, introduces=findings), notes + refute_notes, dropped
 
 
-def _ensemble(arm, recorder, pr, diff, lane, prompts_dir, seat_models):
+def _ensemble(arm, recorder, pr, diff, lane, prompts_dir, seat_models, live=None):
     """`ensemble_review_detailed` records a failed reviewer run and carries on —
     correct for a flaky subagent, wrong for a replay, where a missing recording
     means this arm is not the live pipeline. Capture the misses the ensemble
-    swallows and surface them, exactly as `_refute` does for the skeptic."""
+    swallows and surface them, exactly as `_refute` does for the skeptic.
+
+    The judge needs the same treatment for the same reason: `_judge_merge`
+    catches every exception and falls back to the deterministic grouping with
+    a note, so a judge prompt with no recording would otherwise score as a
+    silently un-judged `ensemble+judge` — the arm no longer being the live
+    pipeline, reported as if it were."""
     misses: list[ReplayMiss] = []
+    judge_misses: list[ReplayMiss] = []
     replay = replay_reviewer(recorder, seat_models)
 
     def reviewer(pr_, payload, lane_):
@@ -113,7 +134,8 @@ def _ensemble(arm, recorder, pr, diff, lane, prompts_dir, seat_models):
             misses.append(exc)
             raise
 
-    judge = replay_model_fn(recorder, "judge") if arm in JUDGED_ARMS else None
+    judge = (_guarded(replay_model_fn(recorder, "judge"), judge_misses, _live_fn(live, "judge_fn"))
+             if arm in JUDGED_ARMS else None)
     try:
         verdict, notes = ensemble_review_detailed(
             pr, diff, lane, reviewer, size=3, min_agreement=1,
@@ -125,7 +147,32 @@ def _ensemble(arm, recorder, pr, diff, lane, prompts_dir, seat_models):
         raise
     if misses:
         raise ReplayMiss(f"{len(misses)} seat call(s) had no recording")
+    if judge_misses:
+        raise ReplayMiss("judge prompt had no recording")
     return verdict, notes
+
+
+def _live_fn(live: LiveFallbacks | None, field: str) -> ModelFn | None:
+    return getattr(live, field) if live is not None else None
+
+
+def _guarded(replay: ModelFn, misses: list[ReplayMiss], live: ModelFn | None) -> ModelFn:
+    """Replay, with the miss handling every fail-open caller destroys.
+
+    With a `live` fallback (repair mode) a miss is answered by a real call,
+    which records itself, so the same prompt replays cleanly next time.
+    Without one the miss is captured before it is re-raised: `_judge_merge`
+    and `refute_findings` both swallow every exception by design, so this list
+    is the only channel that survives back to `build_arm`."""
+    def model_fn(prompt: str) -> str:
+        try:
+            return replay(prompt)
+        except ReplayMiss as exc:
+            if live is not None:
+                return live(prompt)
+            misses.append(exc)
+            raise
+    return model_fn
 
 
 def _slug_from_url(url: str) -> str:
@@ -136,21 +183,13 @@ def _slug_from_url(url: str) -> str:
     return f"{match.group(1)}/{match.group(2)}"
 
 
-def _refute(introduces, diff, recorder, prompts_dir):
+def _refute(introduces, diff, recorder, prompts_dir, live=None):
     """`refute_findings` fails open per finding (a broken skeptic costs a note,
     not a finding) — but a *missing recording* is not a broken skeptic, it is
     a gap in the corpus, and must surface as `replay_miss` rather than render
     as a clean, unrefuted finding."""
     misses: list[ReplayMiss] = []
-    replay = replay_model_fn(recorder, "skeptic")
-
-    def skeptic(prompt: str) -> str:
-        try:
-            return replay(prompt)
-        except ReplayMiss as exc:
-            misses.append(exc)
-            raise
-
+    skeptic = _guarded(replay_model_fn(recorder, "skeptic"), misses, _live_fn(live, "skeptic_fn"))
     findings, notes = refute_findings(introduces, diff, skeptic, prompts_dir)
     if misses:
         raise ReplayMiss(f"{len(misses)} skeptic prompt(s) had no recording")
