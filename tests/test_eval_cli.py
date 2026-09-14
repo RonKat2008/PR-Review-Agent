@@ -19,6 +19,7 @@ from prime_pr_review.providers import (
     MAX_COMPLETION_TOKENS,
     CostMeter,
     MeterBox,
+    ProviderError,
     Usage,
 )
 
@@ -236,7 +237,7 @@ def test_repair_run_reissues_only_the_missing_seat(tmp_path):
     assert len(new_files) == 1
     assert json.loads(new_files[0].read_text())["prompt"] == "shared prompt"
     assert is_done(inst)
-    assert counts == {"instances": 1, "repaired": 1, "calls": 1, "unrepairable": 0}
+    assert counts == {"instances": 1, "repaired": 1, "calls": 1, "unrepairable": 0, "failed": 0}
 
 
 def test_repair_run_leaves_a_fully_recorded_instance_untouched(tmp_path):
@@ -251,7 +252,7 @@ def test_repair_run_leaves_a_fully_recorded_instance_untouched(tmp_path):
     counts = mod.repair_run(run_dir, _repair_provider(mod))
 
     assert len(list((inst / "calls").glob("*-seat.json"))) == 3
-    assert counts == {"instances": 1, "repaired": 0, "calls": 0, "unrepairable": 0}
+    assert counts == {"instances": 1, "repaired": 0, "calls": 0, "unrepairable": 0, "failed": 0}
 
 
 def test_repair_run_counts_an_instance_with_no_seat_files_as_unrepairable(tmp_path):
@@ -263,8 +264,37 @@ def test_repair_run_counts_an_instance_with_no_seat_files_as_unrepairable(tmp_pa
 
     counts = mod.repair_run(run_dir, _repair_provider(mod))
 
-    assert counts == {"instances": 1, "repaired": 0, "calls": 0, "unrepairable": 1}
+    assert counts == {"instances": 1, "repaired": 0, "calls": 0, "unrepairable": 1, "failed": 0}
     assert not list((inst / "calls").glob("*.json"))
+
+
+def test_repair_run_records_a_failed_seat_and_continues_to_the_next(tmp_path):
+    mod = _load()
+    run_dir = tmp_path / "run"
+    inst = run_dir / "inst-0"
+    rec = Recorder(inst)
+    recording_model_fn("seat", "m/b", lambda p, o="out-b": o, rec)("shared prompt")
+    mark_done(inst)
+
+    def make_model_fn(model):
+        if model == "m/a":
+            def boom(_prompt):
+                raise ProviderError("empty content (finish_reason=length)")
+            return boom
+        return lambda p, o=f"resp-{model}": o
+
+    pricing = {m: (1.0, 1.0) for m in ("m/a", "m/b", "m/c")}
+    box = MeterBox(CostMeter(cap_usd=10, pricing=pricing))
+    provider = mod.Provider(make_reviewer_model_fn=make_model_fn,
+                            aux_fn=lambda p: "", skeptic_fn=lambda p: "", judge_fn=lambda p: "",
+                            box=box, seat_models=("m/a", "m/b", "m/c"))
+
+    counts = mod.repair_run(run_dir, provider)
+
+    seat_files = sorted((inst / "calls").glob("*-seat.json"))
+    recorded_models = {json.loads(p.read_text())["model"] for p in seat_files}
+    assert recorded_models == {"m/b", "m/c"}
+    assert counts == {"instances": 1, "repaired": 1, "calls": 1, "unrepairable": 0, "failed": 1}
 
 
 def test_run_repair_flag_skips_the_normal_loop_and_never_calls_run_one(tmp_path, monkeypatch):

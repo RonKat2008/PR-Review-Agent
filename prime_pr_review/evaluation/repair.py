@@ -17,7 +17,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
-from ..providers import MeterBox, Usage
+from ..providers import BudgetExceeded, MeterBox, Usage
 from .recording import Recorder, is_done, recording_model_fn, seat_calls
 
 ModelFn = Callable[[str], str]
@@ -73,9 +73,9 @@ def repair_run(run_dir: Path, provider: SeatProvider) -> dict:
     """
     meter_path = run_dir / "meter.json"
     if not run_dir.is_dir():
-        return {"instances": 0, "repaired": 0, "calls": 0, "unrepairable": 0}
+        return {"instances": 0, "repaired": 0, "calls": 0, "unrepairable": 0, "failed": 0}
     done = sorted(p for p in run_dir.iterdir() if p.is_dir() and is_done(p))
-    repaired = calls = unrepairable = 0
+    repaired = calls = unrepairable = failed = 0
     for i, inst in enumerate(done, 1):
         recorder = Recorder(inst)
         missing = _missing_seat_models(recorder, provider.seat_models)
@@ -89,11 +89,20 @@ def repair_run(run_dir: Path, provider: SeatProvider) -> dict:
         for model in missing:
             wrapped = recording_model_fn("seat", model, provider.make_reviewer_model_fn(model),
                                          recorder, usage)
-            wrapped(prompt)
+            try:
+                wrapped(prompt)
+            except BudgetExceeded:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a seat call may fail in any manner
+                failed += 1
+                print(f"[repair {i}/{len(done)}] {inst.name}: seat {model} failed: "
+                      f"{type(exc).__name__}: {str(exc)[:100]}")
+                continue
             calls += 1
         repaired += 1
         print(f"[repair {i}/{len(done)}] {inst.name}: +{','.join(missing)} "
               f"| spent ${provider.box.meter.spent_usd:.2f}")
         meter_path.write_text(provider.box.meter.to_json(), encoding="utf-8")
         provider.box.meter.check()
-    return {"instances": len(done), "repaired": repaired, "calls": calls, "unrepairable": unrepairable}
+    return {"instances": len(done), "repaired": repaired, "calls": calls,
+            "unrepairable": unrepairable, "failed": failed}

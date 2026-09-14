@@ -281,7 +281,8 @@ def _cmd_repair(run_dir: Path, cap_usd: float) -> int:
         print(f"stopping: {exc}")
         return 3
     print(f"repair: {counts['repaired']}/{counts['instances']} instances repaired, "
-          f"{counts['calls']} calls, {counts['unrepairable']} unrepairable")
+          f"{counts['calls']} calls, {counts['unrepairable']} unrepairable, "
+          f"{counts['failed']} failed")
     return 0
 
 
