@@ -100,7 +100,9 @@ LIMITATIONS = (
      "lineup's qwen/qwen3.8-max, which reasons without bound (~7 min and $0.10 per PR)."),
     ("Instances repaired after the live run (missing seats re-issued) had their judge and skeptic "
      "calls re-issued offline against the rebuilt verdict; those calls are recorded and replayed "
-     "like live ones but were not part of the original review's wall time."),
+     "like live ones but were not part of the original review's wall time. Their live verdicts "
+     "were produced with a seat missing, so they no longer match the replay and are what the "
+     "live/replay drift count measures."),
 )
 
 

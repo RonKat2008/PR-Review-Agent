@@ -15,13 +15,39 @@ defects — including correctly staying silent on a behavior-preserving change.
 
 See **[RESULTS.md](RESULTS.md)** for the full reviews and caveats.
 
-```
-131 tests passing, 97% coverage
-4 considered | 4 reviewed | 0 posted (dry-run) | 0 errors
-```
+Nothing has posted to GitHub — `dry_run = true`, and the real target repos are
+configured `read_only`.
 
-Currently pointed at a throwaway demo repo. Not yet aimed at a real project, and
-nothing has posted to GitHub — `dry_run = true`.
+## Evaluation
+
+Measured on **200 real pull requests** sampled from the public
+[SWE-CARE](https://huggingface.co/datasets/inclusionAI/SWE-CARE) test split, scored
+against the human review comments on each PR (a finding matches a comment on the same
+file within ±5 lines). Every model call was recorded once and each ablation arm is
+rebuilt offline from those recordings, so the table below is reproducible without
+re-running a model.
+
+| arm | PRs | precision | recall | findings/PR | fabrication | $/PR |
+|---|---|---|---|---|---|---|
+| single seat (mean of 3) | 185 | 0.25 | 0.20 | 1.39 | 0.00 | 0.05 |
+| 3-lab ensemble | 192 | 0.24 | **0.34** | 3.45 | 0.00 | 0.14 |
+| + judge-merge | 192 | 0.22 | 0.30 | 2.59 | 0.00 | 0.15 |
+| + skeptic (full pipeline) | 192 | 0.23 | 0.27 | 2.17 | 0.00 | 0.21 |
+
+What it shows:
+
+- **The ensemble is the win.** Three model families voting blind raise recall from
+  0.20 (average seat) and 0.24 (strongest seat) to 0.34, at unchanged precision.
+- **The adversarial passes trade recall for noise.** Judge-merge and the skeptic cut
+  findings per PR from 3.45 to 2.17, but do not raise precision against human comments.
+- **Citations are sound.** Near-zero fabricated file/line citations across every arm.
+- **Precision near 0.25 is in line with published benchmarks** for automated review
+  against human comments, and is a lower bound: a real defect no human commented on
+  counts as a false positive.
+
+Full ladder, per-severity breakdown, cost and wall time per arm, and every limitation:
+[`docs/eval/swecare-200-s0.md`](docs/eval/swecare-200-s0.md). Reproduce with
+`prime-review eval run --count 200 --seed 0`, then `eval score` and `eval report`.
 
 ## Setup
 
@@ -64,10 +90,14 @@ comments twice on the same head SHA), and self-authored-PR exclusion. All enforc
 ## Layout
 
 ```
-prime_pr_review/       config, gh wrapper, diffs, verdicts, state, sinks, sweep
-skills/pr-review/      SKILL.md + the two review prompts
-tests/                 131 tests, everything external injected
-docs/superpowers/specs/ design doc
+prime_pr_review/             config, gh wrapper, diffs, verdicts, state, sinks, sweep,
+                             citations, ensemble, judge, refute, Prime Inference provider
+prime_pr_review/evaluation/  SWE-CARE corpus, recording/replay, ablation arms, scoring
+scripts/eval_swecare.py      prime-review eval run | score | report
+skills/pr-review/            SKILL.md + review, intent, blast, judge and skeptic prompts
+tests/                       1,000+ tests, everything external injected
+docs/eval/                   published evaluation results
+docs/superpowers/            design specs and implementation plans
 ```
 
 ## Tests
