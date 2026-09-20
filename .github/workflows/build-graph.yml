@@ -3,7 +3,7 @@ name: Build Knowledge Graph
 # --- Deployment model ----------------------------------------------------------
 # Mines whichever repo this workflow is currently checked out in (see
 # `--repo .` below) -- today, that is this agent repo itself. Producing a
-# meaningful co-change graph of example-org/service-a or example-org/service-b
+# meaningful co-change graph of a target repository
 # requires the owner to copy this file, together with the single,
 # dependency-free scripts/build_cochange.py (see the step below), into that
 # repo's own .github/workflows/ and scripts/ -- a manual step, documented in

@@ -10,27 +10,26 @@ fits the larger plan, and `docs/KNOWLEDGE-GRAPH.md` for the graph schema.
 
 ## 1. Deployment model — read this first
 
-**These workflow files live in this agent repo (`pr-review-agent`) as the
+**These workflow files live in this agent repo as the
 deployable unit. They are not, by themselves, a live deployment against
-example-org/service-a or example-org/service-b.**
+a target repository.**
 
 A GitHub Actions token (`secrets.GITHUB_TOKEN`) is always scoped to exactly
 the one repository whose workflow is running. It cannot read or comment on
 PRs in a *different* repository, even one owned by the same account, and
-this agent repo (`RonKat2008/pr-review-agent`) is not in the same GitHub
-organization as the two real targets (`example-org/service-a`,
-`example-org/service-b`). Practically, that means:
+this agent repo is not in the same GitHub organization as the real target
+repositories. Practically, that means:
 
 - As committed here, `pr-review.yml`'s automatic `pull_request_target`
   trigger reviews PRs opened against **whichever repo currently hosts this
-  file** — today, that is this agent repo. It cannot see a example-org PR.
+  file** — today, that is this agent repo. It cannot see a PR on a target repo.
 - `build-graph.yml` likewise mines the git history of **whichever repo it is
   checked out in** (`--repo .`). Run from here, it produces a graph of this
-  agent repo's own history, not service-a's or service-b's.
+  agent repo's own history, not a target repo's.
 
 **Installing into a target repo is the owner's manual step, and this repo
-never performs it automatically.** To make either workflow live against
-example-org/service-a or example-org/service-b, the owner copies the relevant
+never performs it automatically.** To make either workflow live against a
+target repository, the owner copies the relevant
 file(s) directly into *that* repo's own `.github/workflows/`:
 
 | Workflow | Files to copy | Why both |
@@ -55,7 +54,7 @@ repo itself. See §5.
 ## 2. Secrets — exactly what to create, and where
 
 Both are **repository secrets** on whichever repo is hosting the workflow
-file at the time (`RonKat2008/pr-review-agent` today; the target repo,
+file at the time (this agent repo today; the target repo,
 once installed there): **Settings → Secrets and variables → Actions → New
 repository secret**.
 
@@ -110,9 +109,9 @@ design, not a bug to fix — see §7.
 
 ## 4. `read_only` mode: artifacts and job summaries, not comments
 
-`config.toml` sets `read_only = true` on both `[[repos]]` entries for
-`example-org/service-a` and `example-org/service-b` (the owner's standing
-instruction: never upload anything to either repo). `sinks.py`'s
+`config.toml` sets `read_only = true` on each target repo's `[[repos]]`
+entry (the owner's standing instruction: never upload anything to those
+repos). `sinks.py`'s
 `evaluate_comment_gates` checks this **before** `dry_run`, on purpose — it
 is a standing write-ban on the repo itself, not a mode a config flag can
 override.
@@ -161,7 +160,7 @@ inferred from an ambient PR event. Recommended order:
 
 Note the one real constraint from §1: a `workflow_dispatch` run's `gh` calls
 still only work for whichever repo the token is scoped to (the repo hosting
-the workflow at dispatch time). A dispatch run against `example-org/service-a`
+the workflow at dispatch time). A dispatch run against a target repository
 triggered *from this agent repo* will fail to read that PR — dispatch has to
 happen from wherever the file is actually installed for the token to have
 access.
@@ -201,8 +200,8 @@ recorded here so they are not silently rediscovered later.
 1. **The reviewer's Python source has no cross-repo install path yet.**
    `build_cochange.py` is deliberately dependency-free so it can be copied
    standalone into a target repo (§1). `prime_pr_review` has no equivalent —
-   installing `pr-review.yml` into `example-org/service-a` or
-   `example-org/service-b` needs a way to get the package onto that runner
+   installing `pr-review.yml` into a target repository
+   needs a way to get the package onto that runner
    (vendoring the source, a git submodule, publishing it as an installable
    package, or a cross-org PAT stored under a non-reserved secret name).
    None of those is chosen yet; this file only documents that the decision
@@ -217,10 +216,10 @@ recorded here so they are not silently rediscovered later.
    "graph skipped: no git runner configured" before `graph_path` is even
    consulted — independent of whether `pr-review.yml`'s download step found
    an artifact. `run_sweep.py` has no `--graph-path` or `--repo-root` CLI
-   flag to override this per-invocation from CI, so today's checked-in
-   `graphs/service-a-cochange.json` and `graphs/service-b-cochange.json` (built
-   locally, once) remain the only usable graphs anywhere, CI included, until
-   `repo_root` is set.
+   flag to override this per-invocation from CI, so any locally-mined
+   target-repo graphs (gitignored; see `graphs/django-cochange.json` for the
+   public-repo example that stays tracked) remain the only usable graphs
+   anywhere, CI included, until `repo_root` is set.
 
 3. **CI state is cold on every run.** `state/*.json` is gitignored on
    purpose (per-machine watermarks), so a fresh checkout never has one:
@@ -250,6 +249,6 @@ net effect of every combination that matters:
 | `false` | `false` | `false` (default) | Yes — as `COMMENT`-event PR reviews only, never `REQUEST_CHANGES`. | No — a plain comment review is never treated as blocking, regardless of branch protection rules. |
 | `false` | `false` | `true` | Yes, and a `CRITICAL` finding or a broken caller may submit `REQUEST_CHANGES`. | Only if the target branch's protection rule requires approving reviews / disallows unresolved "changes requested" — and only if this bot's GitHub identity is not exempted from that rule. Off by default (`allow_request_changes = false`) precisely so this is an explicit, deliberate choice, not an inherited default. |
 
-Both `[[repos]]` entries for example-org today are `read_only = true`, so row 1
+Every target repo's `[[repos]]` entry is `read_only = true` today, so row 1
 applies regardless of anything else in `config.toml` — including the
 `dry_run` and `allow_request_changes` values shown in the other rows.

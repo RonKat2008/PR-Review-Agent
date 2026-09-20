@@ -18,22 +18,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from prime_pr_review.github import GitHubError
 from prime_pr_review.state import State
 from prime_pr_review.sweep import Enrichment, PullRequestOutcome, SweepReport
-
 from scripts import replay_corpus
 
 from .conftest import (
-    FakeGh,
     SAMPLE_DIFF,
     VERDICT_EMPTY,
     VERDICT_WITH_BUG,
+    FakeGh,
     is_pr_diff,
     is_pr_list,
     make_config,
@@ -41,7 +39,7 @@ from .conftest import (
     pr_list_json,
 )
 
-NOW = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
 
 VERDICT_RICH = (
     '{"introduces":['
@@ -77,25 +75,22 @@ def _write_config(tmp_path: Path) -> Path:
     rather than merely agreeing with an already-safe default. The three
     enrichment passes are off so a test never has to also stub a model_fn.
     """
-    text = "\n".join(
-        [
-            "[repo]",
-            'owner = "acme"',
-            'name = "widget"',
-            "read_only = false",
-            "",
-            "[review]",
-            "dry_run = false",
-            "check_intent = false",
-            "check_blast = false",
-            "gather_context = false",
-            "",
-            "[sinks]",
-            "pr_comment = true",
-            "webhook = false",
-            "local_file = true",
-            "",
-        ]
+    text = (
+        "[repo]\n"
+        'owner = "acme"\n'
+        'name = "widget"\n'
+        "read_only = false\n"
+        "\n"
+        "[review]\n"
+        "dry_run = false\n"
+        "check_intent = false\n"
+        "check_blast = false\n"
+        "gather_context = false\n"
+        "\n"
+        "[sinks]\n"
+        "pr_comment = true\n"
+        "webhook = false\n"
+        "local_file = true\n"
     )
     path = tmp_path / "config.toml"
     path.write_text(text, encoding="utf-8")
@@ -658,11 +653,11 @@ def test_graph_status_reports_no_degradation_when_nothing_was_noted(tmp_path):
 
 
 def test_report_filename_matches_the_expected_pattern():
-    now = datetime(2026, 3, 4, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 4, tzinfo=UTC)
 
     assert (
-        replay_corpus._report_filename("example-org/service-b", now)
-        == "replay-example-org-service-b-20260304.md"
+        replay_corpus._report_filename("ExampleOrg/ServiceB", now)
+        == "replay-ExampleOrg-ServiceB-20260304.md"
     )
 
 
@@ -743,18 +738,13 @@ def test_main_returns_exit_1_when_config_file_is_missing(tmp_path, capsys):
 def test_main_returns_exit_1_when_repo_selector_is_ambiguous(tmp_path, capsys):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        "\n".join(
-            [
-                "[[repos]]",
-                'owner = "acme"',
-                'name = "one"',
-                "",
-                "[[repos]]",
-                'owner = "acme"',
-                'name = "two"',
-                "",
-            ]
-        ),
+        "[[repos]]\n"
+        'owner = "acme"\n'
+        'name = "one"\n'
+        "\n"
+        "[[repos]]\n"
+        'owner = "acme"\n'
+        'name = "two"\n',
         encoding="utf-8",
     )
 
@@ -864,13 +854,13 @@ def test_main_never_posts_even_through_the_full_cli_with_a_live_config(tmp_path)
 
 def test_open_state_lists_open_prs_and_suffixes_the_report_name():
     """--state open previews live candidates without touching merged history."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from scripts.replay_corpus import _report_filename, _select_prs
     from tests.conftest import FakeGh, is_pr_list, make_pr, pr_list_json
 
     gh = FakeGh().on(is_pr_list, pr_list_json(make_pr(number=8), make_pr(number=7)))
-    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
 
     picked = _select_prs("acme/widget", gh, 1, now, pr_state="open")
 

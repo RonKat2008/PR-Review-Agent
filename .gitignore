@@ -26,9 +26,14 @@ build/
 .prime/sessions/
 .prime/logs/
 
-# Knowledge graphs are TRACKED (owner's choice, for convenience): they contain
-# file paths of the reviewed private repos, so if this repo ever gets a remote,
-# it must be private.
+# Knowledge graphs mined from private repos are NOT tracked: they contain file
+# paths of the reviewed repos. Only the public-repo example stays tracked.
+graphs/*.json
+graphs/*.md
+!graphs/django-cochange.json
+
+# Per-machine agent settings (contains an absolute local path)
+.prime/agent/settings.json
 
 # Stray pytest capture files from subagent runs
 pytest_stdout.txt

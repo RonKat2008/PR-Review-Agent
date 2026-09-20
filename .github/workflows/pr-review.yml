@@ -5,15 +5,15 @@ name: PR Review
 # deployable unit, not a live deployment by itself -- see docs/GITHUB-ACTIONS.md.
 # A GitHub Actions token is always scoped to exactly the one repository a
 # workflow runs in, so `secrets.GITHUB_TOKEN` here can only read/comment on PRs
-# in whichever repo currently hosts this file. Reviewing example-org/service-a or
-# example-org/service-b therefore requires the owner to manually copy this file
+# in whichever repo currently hosts this file. Reviewing a target repository
+# therefore requires the owner to manually copy this file
 # (and, separately, make the reviewer's Python source available there) into
 # that repo's own .github/workflows/ -- a documented, manual step this
 # repository never performs on its own. `--repo` below resolves to whichever
 # repository is actually running the workflow, so the same file works
 # unmodified after that copy.
 #
-# read_only = true is set on both example-org targets in config.toml (owner's
+# read_only = true is set on every target repo in config.toml (owner's
 # standing instruction). The sweep still runs there and still writes
 # reviews/*.md, but the comment sink refuses to post -- see sinks.py's
 # evaluate_comment_gates, checked before dry_run on purpose. Until the owner
@@ -29,7 +29,7 @@ on:
       repo:
         description: >-
           Repo to review, as owner/name, matching a config.toml [[repos]]
-          entry (e.g. example-org/service-a). Required -- see "test with
+          entry (e.g. your-org/your-service). Required -- see "test with
           workflow_dispatch" in docs/GITHUB-ACTIONS.md.
         required: true
         type: string

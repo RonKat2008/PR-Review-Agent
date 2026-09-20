@@ -36,26 +36,26 @@ owner = "acme"
 name = "widget"
 
 [[repos]]
-owner = "example-org"
-name = "service-a"
+owner = "ExampleOrg"
+name = "ServiceA"
 read_only = true
 repo_root = "/checkouts/service-a"
 graph_path = "graphs/service-a-cochange.json"
 
 [[repos]]
-owner = "example-org"
-name = "service-b"
+owner = "ExampleOrg"
+name = "ServiceB"
 read_only = true
 graph_path = "graphs/service-b-cochange.json"
 """
 
-service-a_ENTRY = RepoEntry(
-    repo=RepoConfig(owner="example-org", name="service-a", read_only=True),
+SERVICE_A_ENTRY = RepoEntry(
+    repo=RepoConfig(owner="ExampleOrg", name="ServiceA", read_only=True),
     repo_root="/checkouts/service-a",
     graph_path="graphs/service-a-cochange.json",
 )
 SERVICE_B_ENTRY = RepoEntry(
-    repo=RepoConfig(owner="example-org", name="service-b", read_only=True),
+    repo=RepoConfig(owner="ExampleOrg", name="ServiceB", read_only=True),
     graph_path="graphs/service-b-cochange.json",
 )
 
@@ -108,7 +108,7 @@ def test_shipped_config_is_valid():
 
 
 def test_repo_read_only_parses_from_toml(tmp_path):
-    toml = '[repo]\nowner = "example-org"\nname = "service-a"\nread_only = true\n'
+    toml = '[repo]\nowner = "exampleorg"\nname = "servicea"\nread_only = true\n'
 
     config = load_config(_write(tmp_path, toml))
 
@@ -205,8 +205,8 @@ def test_repos_array_parses_every_entry(tmp_path):
     config = load_config(_write(tmp_path, REPOS_TOML))
 
     assert [entry.repo.slug for entry in config.repos] == [
-        "example-org/service-a",
-        "example-org/service-b",
+        "ExampleOrg/ServiceA",
+        "ExampleOrg/ServiceB",
     ]
 
 
@@ -236,9 +236,9 @@ def test_repos_entry_repo_root_and_graph_path_default_to_empty(tmp_path):
 def test_repos_entry_carries_its_own_repo_root_and_graph_path(tmp_path):
     config = load_config(_write(tmp_path, REPOS_TOML))
 
-    service-a = config.repos[0]
-    assert service-a.repo_root == "/checkouts/service-a"
-    assert service-a.graph_path == "graphs/service-a-cochange.json"
+    servicea = config.repos[0]
+    assert servicea.repo_root == "/checkouts/service-a"
+    assert servicea.graph_path == "graphs/service-a-cochange.json"
 
 
 def test_flat_repo_block_still_parses_when_repos_array_is_present(tmp_path):
@@ -250,57 +250,54 @@ def test_flat_repo_block_still_parses_when_repos_array_is_present(tmp_path):
 
 def test_duplicate_repo_entries_are_rejected(tmp_path):
     toml = (
-        '[[repos]]\nowner = "example-org"\nname = "service-a"\n\n'
-        '[[repos]]\nowner = "example-org"\nname = "service-a"\n'
+        '[[repos]]\nowner = "ExampleOrg"\nname = "ServiceA"\n\n'
+        '[[repos]]\nowner = "exampleorg"\nname = "servicea"\n'
     )
 
     with pytest.raises(ConfigError, match="unique"):
         load_config(_write(tmp_path, toml))
 
 
-def test_shipped_config_has_both_target_repos_as_read_only():
-    """Owner's standing instruction: never write to either target repo.
+def test_shipped_config_marks_every_non_demo_repo_as_read_only():
+    """Owner's standing instruction: never write to a real target repo.
 
-    Scoped to the example-org entries on purpose: other entries (the demo repo)
-    are allowed to be writable — the demo is where live posting is validated.
+    Scoped to exclude the demo/answer-key repo on purpose: that one is
+    allowed to be writable — it is where live posting is validated.
     """
     config = load_config("config.toml")
 
     read_only_by_slug = {
         entry.repo.slug: entry.repo.read_only
         for entry in config.repos
-        if entry.repo.owner.lower() == "example-org"
+        if entry.repo.slug != "RonKat2008/prime-agent-review-demo"
     }
 
-    assert read_only_by_slug == {
-        "example-org/service-a": True,
-        "example-org/service-b": True,
-    }
+    assert read_only_by_slug == {"django/django": True}
 
 
 # --- resolve_active -----------------------------------------------------------
 
 
 def test_resolve_active_matches_full_slug_case_insensitively():
-    config = _with_repos(service-a_ENTRY, SERVICE_B_ENTRY)
+    config = _with_repos(SERVICE_A_ENTRY, SERVICE_B_ENTRY)
 
-    resolved = resolve_active(config, "example-org/service-a")
+    resolved = resolve_active(config, "exampleorg/servicea")
 
-    assert resolved.repo.slug == "example-org/service-a"
+    assert resolved.repo.slug == "ExampleOrg/ServiceA"
 
 
 def test_resolve_active_matches_bare_name_case_insensitively():
-    config = _with_repos(service-a_ENTRY, SERVICE_B_ENTRY)
+    config = _with_repos(SERVICE_A_ENTRY, SERVICE_B_ENTRY)
 
-    resolved = resolve_active(config, "service-b")
+    resolved = resolve_active(config, "SERVICEB")
 
-    assert resolved.repo.slug == "example-org/service-b"
+    assert resolved.repo.slug == "ExampleOrg/ServiceB"
 
 
 def test_resolve_active_overrides_repo_root_and_graph_path_from_the_entry():
-    config = _with_repos(service-a_ENTRY, SERVICE_B_ENTRY)
+    config = _with_repos(SERVICE_A_ENTRY, SERVICE_B_ENTRY)
 
-    resolved = resolve_active(config, "service-a")
+    resolved = resolve_active(config, "ServiceA")
 
     assert resolved.review.repo_root == "/checkouts/service-a"
     assert resolved.review.graph_path == "graphs/service-a-cochange.json"
@@ -315,32 +312,32 @@ def test_resolve_active_keeps_existing_repo_root_when_entry_leaves_it_empty():
         repos=(SERVICE_B_ENTRY,),  # sets graph_path but not repo_root
     )
 
-    resolved = resolve_active(config, "service-b")
+    resolved = resolve_active(config, "ServiceB")
 
     assert resolved.review.repo_root == "/existing"
     assert resolved.review.graph_path == "graphs/service-b-cochange.json"
 
 
 def test_resolve_active_raises_for_unknown_selector_and_lists_available_names():
-    config = _with_repos(service-a_ENTRY, SERVICE_B_ENTRY)
+    config = _with_repos(SERVICE_A_ENTRY, SERVICE_B_ENTRY)
 
-    with pytest.raises(ConfigError, match="example-org/service-a"):
+    with pytest.raises(ConfigError, match="ExampleOrg/ServiceA"):
         resolve_active(config, "nonexistent")
 
 
 def test_resolve_active_without_selector_and_multiple_entries_raises():
-    config = _with_repos(service-a_ENTRY, SERVICE_B_ENTRY)
+    config = _with_repos(SERVICE_A_ENTRY, SERVICE_B_ENTRY)
 
     with pytest.raises(ConfigError, match="--repo"):
         resolve_active(config)
 
 
 def test_resolve_active_without_selector_and_single_entry_auto_selects():
-    config = _with_repos(service-a_ENTRY)
+    config = _with_repos(SERVICE_A_ENTRY)
 
     resolved = resolve_active(config)
 
-    assert resolved.repo.slug == "example-org/service-a"
+    assert resolved.repo.slug == "ExampleOrg/ServiceA"
 
 
 def test_resolve_active_without_selector_and_no_repos_returns_flat_fallback_unchanged():
@@ -362,7 +359,7 @@ def test_resolve_active_with_selector_but_no_repos_entries_raises():
 def test_resolve_active_end_to_end_from_parsed_toml(tmp_path):
     config = load_config(_write(tmp_path, REPOS_TOML))
 
-    resolved = resolve_active(config, "example-org/service-b")
+    resolved = resolve_active(config, "ExampleOrg/ServiceB")
 
     assert resolved.repo.read_only is True
     assert resolved.review.graph_path == "graphs/service-b-cochange.json"

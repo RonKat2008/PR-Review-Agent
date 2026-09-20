@@ -1,6 +1,6 @@
 """E1 replay harness: replay real merged PRs in dry-run, write one report.
 
-    python scripts/replay_corpus.py --repo example-org/service-b --count 20
+    python scripts/replay_corpus.py --repo owner/my-service --count 20
 
 This is the go-live gate from docs/FINAL-PLAN.md (Phase E, E1): replay 20+
 already-merged PRs from a real repo, read every review, judge precision by
@@ -29,37 +29,37 @@ import os
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from prime_pr_review import github  # noqa: E402
-from prime_pr_review.analysis import run_analysis  # noqa: E402
-from prime_pr_review.config import (  # noqa: E402
+from prime_pr_review import github
+from prime_pr_review.analysis import run_analysis
+from prime_pr_review.config import (
     Config,
     ConfigError,
     load_config,
     require_repo,
     resolve_active,
 )
-from prime_pr_review.feedback import FeedbackError, load_rejections  # noqa: E402
-from prime_pr_review.github import PullRequest  # noqa: E402
-from prime_pr_review.graph import strict_runner  # noqa: E402
-from prime_pr_review.review import BLOCKING_SEVERITIES  # noqa: E402
-from prime_pr_review.reviewers import (  # noqa: E402
+from prime_pr_review.feedback import FeedbackError, load_rejections
+from prime_pr_review.github import PullRequest
+from prime_pr_review.graph import strict_runner
+from prime_pr_review.review import BLOCKING_SEVERITIES
+from prime_pr_review.reviewers import (
     DEFAULT_GEMINI_MODEL,
     gemini_model_fn,
     gemini_reviewer,
 )
-from prime_pr_review.state import LANE_OPEN, State  # noqa: E402
-from prime_pr_review.sweep import (  # noqa: E402
+from prime_pr_review.state import LANE_OPEN, State
+from prime_pr_review.sweep import (
     Enrichment,
     PullRequestOutcome,
     Reviewer,
     sweep_lane,
 )
-from prime_pr_review.template import render_review  # noqa: E402
+from prime_pr_review.template import render_review
 
 # Duplicated from scripts/run_sweep.py (see module docstring).
 AUTH_FILE = Path.home() / ".prime" / "agent" / "auth.json"
@@ -304,7 +304,7 @@ def run_replay(
     including a test that passes a config with `dry_run=False`.
     """
     locked = _lock_down(config)
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     candidates = _select_prs(repo_slug, runner, count, moment, pr_state)
     results = tuple(
         _replay_one(locked, pr, reviewer, enrichment, runner, reviews_dir)
@@ -462,7 +462,7 @@ def render_report(run: ReplayRun) -> str:
         "",
         f"- **repo**: `{run.repo_slug}`",
         f"- **model**: `{run.model}`",
-        f"- **mode**: DRY RUN (forced -- this harness never posts)",
+        "- **mode**: DRY RUN (forced -- this harness never posts)",
         f"- **PR state**: {run.pr_state}",
         f"- **count requested**: {run.count_requested}",
         f"- **count reviewed**: {reviewed}",

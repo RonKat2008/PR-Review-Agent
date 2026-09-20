@@ -3,9 +3,9 @@
 Installed via [project.scripts]; wraps the operational scripts so the agent is
 usable from any working directory:
 
-    prime-review pr example-org/service-b 2567      review exactly one PR
-    prime-review sweep --repo service-b           sweep a lane
-    prime-review replay --repo service-b --state open --count 10
+    prime-review pr owner/my-service 2567         review exactly one PR
+    prime-review sweep --repo my-service          sweep a lane
+    prime-review replay --repo my-service --state open --count 10
     prime-review score                            check the demo answer key
     prime-review check                            preflight (config/secrets/gh)
     prime-review cochange --repo <path> --out <file>

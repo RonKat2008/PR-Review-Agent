@@ -1,8 +1,0 @@
-{
-  "skills": ["/home/user/Projects/pr-review-agent/skills/pr-review"],
-  "retry": {
-    "provider": {
-      "maxRetries": 4
-    }
-  }
-}

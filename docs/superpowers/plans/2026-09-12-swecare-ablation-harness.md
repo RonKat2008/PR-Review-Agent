@@ -67,7 +67,7 @@ Note on intent: `intent.run_intent_check` reads `pr.body` and `pr.commit_message
 ```bash
 .venv/bin/python - <<'EOF'
 import json, pathlib
-src = pathlib.Path("/private/tmp/claude-501/-Users-user-Projects-pr-review-agent/804c9a92-bd6c-4bb4-8fd0-facd2e35b596/scratchpad/swe_care_first_rows.json")
+src = pathlib.Path("/path/to/scratchpad/swe_care_first_rows.json")
 rows = json.loads(src.read_text())["test"]["rows"][:5]
 for r in rows:
     row = r["row"]

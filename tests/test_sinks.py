@@ -23,10 +23,10 @@ from prime_pr_review.sinks import (
 from prime_pr_review.state import LANE_OPEN, build_marker
 
 from .conftest import (
-    FakeGh,
     VERDICT_EMPTY,
     VERDICT_LOW_CONFIDENCE,
     VERDICT_WITH_BUG,
+    FakeGh,
     is_list_comments,
     is_pr_comment,
     make_config,
@@ -88,8 +88,8 @@ def test_silent_verdict_is_blocked():
 def test_read_only_repo_blocks_posting_even_when_dry_run_is_off():
     """The standing write-ban on a repo must not be defeatable by flipping dry_run.
 
-    This encodes the owner's instruction that example-org/service-a and
-    example-org/service-b must never receive any upload from this system.
+    This encodes the owner's instruction that ExampleOrg/ServiceA and
+    ExampleOrg/ServiceB must never receive any upload from this system.
     """
     decision = evaluate_comment_gates(
         make_config(read_only=True, dry_run=False), make_pr(), _verdict(), BUDGET, []

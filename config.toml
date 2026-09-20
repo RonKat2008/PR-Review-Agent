@@ -11,38 +11,29 @@
 owner = "RonKat2008"
 name = "prime-agent-review-demo"
 # Standing write-ban for the configured repo: reviews are still produced locally,
-# but the comment sink is refused no matter what dry_run says. MUST be true
-# whenever this points at example-org/service-a or example-org/service-b (owner's
-# instruction: never upload anything to those repos).
+# but the comment sink is refused no matter what dry_run says. Set
+# read_only = true on any repository the agent must never write to.
 read_only = false
 
 # --- Multi-repo targets (A5) -------------------------------------------------
-# One agent instance serves both target repos. [repo]/[review] above remain the
-# fallback used only when no [[repos]] entries exist (e.g. the demo config
-# above). Once [[repos]] is populated, pick the active entry per invocation
-# with `--repo <owner/name or bare name>` (case-insensitive); resolve_active()
-# rewrites [repo] and review.repo_root/graph_path onto a copy of Config from
-# the chosen entry, so the sweep itself never sees more than one repo.
+# One agent instance can serve multiple target repos. [repo]/[review] above
+# remain the fallback used only when no [[repos]] entries exist (e.g. the demo
+# config above). Once [[repos]] is populated, pick the active entry per
+# invocation with `--repo <owner/name or bare name>` (case-insensitive);
+# resolve_active() rewrites [repo] and review.repo_root/graph_path onto a copy
+# of Config from the chosen entry, so the sweep itself never sees more than
+# one repo.
 #
-# read_only = true on BOTH entries is the owner's standing instruction: never
-# upload anything to either repo. It is a hard write-ban the comment sink
-# honors regardless of dry_run (see RepoConfig.read_only in config.py).
-[[repos]]
-owner = "example-org"
-name = "service-a"
-read_only = true
-# Local checkout. Note: git-grep-based call sites read the working tree, which
-# may sit on a feature branch; the graph freshness check uses origin/<base>
-# and is unaffected.
-repo_root = "/home/user/Projects/service-a"
-graph_path = "graphs/service-a-cochange.json"
-
-[[repos]]
-owner = "example-org"
-name = "service-b"
-read_only = true
-repo_root = "/home/user/Projects/service-b"
-graph_path = "graphs/service-b-cochange.json"
+# Set read_only = true on any repository the agent must never write to. It is
+# a hard write-ban the comment sink honors regardless of dry_run (see
+# RepoConfig.read_only in config.py). Add your own target repos here, e.g.:
+#
+# [[repos]]
+# owner = "your-org"
+# name = "your-service"
+# read_only = true
+# repo_root = "../your-service"
+# graph_path = "graphs/your-service-cochange.json"
 
 [schedule]
 # Cron expressions handed to `prime-agent schedule add`.
@@ -105,10 +96,9 @@ gather_context = true
 max_context_bytes = 400000
 
 # --- Knowledge graph (P10) --------------------------------------------------
-# Graph file for the reviewed repo (schema: docs/KNOWLEDGE-GRAPH.md). Mined ones
-# live in graphs/ (gitignored):
-#   graphs/service-a-cochange.json     - example-org/service-a    @ origin/main
-#   graphs/service-b-cochange.json  - example-org/service-b @ origin/main
+# Graph file for the reviewed repo (schema: docs/KNOWLEDGE-GRAPH.md). Mined
+# ones live in graphs/ (gitignored) and are named <repo>-cochange.json, e.g.
+#   graphs/my-service-cochange.json - your-org/my-service @ origin/main
 # Empty = no graph; a stale graph is refused with a note, never trusted.
 graph_path = ""
 
@@ -118,12 +108,12 @@ graph_path = ""
 # self-report (which pinned at 95% on every PR with a single run).
 #
 # min_agreement = 1 (RECALL MODE): every finding any seat reports is kept,
-# tagged with its agreement ("1/3 reviewers"). Measured on service-b #2700:
-# the three seats found four plausible MEDIUM bugs in four different files,
-# and min_agreement = 2 dropped ALL of them as "Clean". While both target repos
-# are read_only and reviews are local-only, recall is the right trade; raise
-# to 2 before ever posting publicly, or better, add the refutation pass (P14)
-# as the precision gate instead of requiring finders to agree.
+# tagged with its agreement ("1/3 reviewers"). Measured on a real target-repo
+# PR: the three seats found four plausible MEDIUM bugs in four different
+# files, and min_agreement = 2 dropped ALL of them as "Clean". While target
+# repos are read_only and reviews are local-only, recall is the right trade;
+# raise to 2 before ever posting publicly, or better, add the refutation pass
+# (P14) as the precision gate instead of requiring finders to agree.
 # Cost lever: ensemble_size = 1 for cheap single-call reviews.
 ensemble_size = 3
 min_agreement = 1
@@ -164,12 +154,12 @@ webhook_kind = "slack"  # slack | discord | generic
 
 # Public OSS target for evaluation. READ-ONLY IS NON-NEGOTIABLE: this agent
 # must never post on a project that has not invited it. Reviews land in
-# reviews/ locally, exactly like the example-org targets.
+# reviews/ locally, exactly like the other configured targets.
 [[repos]]
 owner = "django"
 name = "django"
 read_only = true
-repo_root = "/home/user/Projects/django"
+repo_root = "../django"
 graph_path = "graphs/django-cochange.json"
 
 # The demo/answer-key repo, kept selectable for scorer runs: --repo prime-agent-review-demo
@@ -177,4 +167,4 @@ graph_path = "graphs/django-cochange.json"
 owner = "RonKat2008"
 name = "prime-agent-review-demo"
 read_only = false
-repo_root = "/home/user/Projects/prime-agent-review-demo"
+repo_root = "../prime-agent-review-demo"

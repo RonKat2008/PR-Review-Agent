@@ -1,7 +1,7 @@
 """Run a sweep against the configured repo using a Gemini-backed reviewer.
 
     python scripts/run_sweep.py --lane open
-    python scripts/run_sweep.py --repo example-org/service-b --pr 42
+    python scripts/run_sweep.py --repo owner/my-service --pr 42
 
 This is the headless path. It needs no prime-agent runtime, no TUI, and no daemon;
 prime-agent's role is scheduling this, not performing it.
@@ -17,28 +17,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from prime_pr_review import github  # noqa: E402
-from prime_pr_review.analysis import run_analysis  # noqa: E402
-from prime_pr_review.config import (  # noqa: E402
+from prime_pr_review import github
+from prime_pr_review.analysis import run_analysis
+from prime_pr_review.config import (
     ConfigError,
     load_config,
     require_repo,
     resolve_active,
 )
-from prime_pr_review.feedback import FeedbackError, load_rejections  # noqa: E402
-from prime_pr_review.graph import strict_runner  # noqa: E402
-from prime_pr_review.reviewers import (  # noqa: E402
+from prime_pr_review.feedback import FeedbackError, load_rejections
+from prime_pr_review.graph import strict_runner
+from prime_pr_review.reviewers import (
     DEFAULT_GEMINI_MODEL,
     gemini_model_fn,
     gemini_reviewer,
 )
-from prime_pr_review.state import (  # noqa: E402
+from prime_pr_review.state import (
     LANE_MERGED,
     LANE_OPEN,
     load_state,
     save_state,
 )
-from prime_pr_review.sweep import Enrichment, sweep_lane  # noqa: E402
+from prime_pr_review.sweep import Enrichment, sweep_lane
 
 AUTH_FILE = Path.home() / ".prime" / "agent" / "auth.json"
 
@@ -57,7 +57,7 @@ def state_file_for(repo_slug: str) -> tuple[Path, Path]:
     """(load_from, save_to) watermark paths for one repo.
 
     PR numbers are only unique within one repository — a shared watermark would
-    put service-a #100 and service-b #100 in the same namespace. Saves always go to
+    put my-service #100 and other-service #100 in the same namespace. Saves always go to
     the per-repo file; loading falls back to the legacy shared file exactly once
     (when no per-repo file exists yet) so demo history migrates rather than
     being re-reviewed.

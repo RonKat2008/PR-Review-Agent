@@ -5,7 +5,7 @@ description: Review open and recently merged pull requests for bugs introduced a
 
 # PR Review Sweep
 
-Automated bug review of example-org/service-a and example-org/service-b, in two lanes:
+Automated bug review of the configured target repositories, in two lanes:
 
 - **`open`** — pre-merge gate. "What breaks if this merges?"
 - **`merged`** — retrospective. "What did this fix, and what regressed?"
@@ -15,7 +15,7 @@ CI/graph/lint evidence, safety gates, rendering, watermarks) lives in the
 `prime_pr_review` package. THIS session supplies the judgment: each review is an
 `rlm(...)` child agent, so the models below do the work — no separate API key.
 
-Both example-org repos are configured `read_only = true` in `config.toml`:
+Every target repo marked `read_only = true` in `config.toml`:
 reviews land in `reviews/` locally and are NEVER posted to GitHub, regardless
 of dry_run or who drives. Do not change that setting.
 
@@ -40,8 +40,10 @@ Typical cost: ~$0.25–0.50/PR.
 
 ## One-time kernel setup
 
+Substitute your own checkout path for `/path/to/pr-review-agent` below.
+
 ```python
-%pip install -q -e /home/user/Projects/pr-review-agent ruff bandit mypy
+%pip install -q -e /path/to/pr-review-agent ruff bandit mypy
 ```
 
 Also required once per machine: `gh auth login` (the pipeline reads PRs via the
@@ -49,7 +51,7 @@ gh CLI). Verify everything with:
 
 ```python
 %%bash
-cd /home/user/Projects/pr-review-agent && ./.venv/bin/prime-review check
+cd /path/to/pr-review-agent && ./.venv/bin/prime-review check
 ```
 
 ## Before each headless run
@@ -77,7 +79,9 @@ import asyncio, json, os, sys, time, uuid
 from dataclasses import replace
 from pathlib import Path
 
-AGENT = Path("/home/user/Projects/pr-review-agent")
+# Reads PR_REVIEW_AGENT_ROOT if set, otherwise falls back to the placeholder —
+# set the env var, or edit the default, to point at your own checkout.
+AGENT = Path(os.environ.get("PR_REVIEW_AGENT_ROOT", "/path/to/pr-review-agent"))
 PROMPTS = AGENT / "skills" / "pr-review" / "prompts"
 VERDICTS = AGENT / "state" / "verdicts"
 
@@ -268,7 +272,7 @@ async def run_sweep(repo_selector, lane=LANE_OPEN, runner=github.default_runner)
 Cell 2 — sweep a lane:
 
 ```python
-report = await run_sweep("service-b", LANE_OPEN)
+report = await run_sweep("my-service", LANE_OPEN)
 ```
 
 Or review exactly one PR (single-PR runs go through the open-lane machinery on
@@ -289,7 +293,7 @@ async def run_single_pr(repo_selector, number):
     runner = github.single_pr_runner(github.default_runner, pr_json)
     return await run_sweep(repo_selector, LANE_OPEN, runner=runner)
 
-report = await run_single_pr("service-b", 2567)
+report = await run_single_pr("my-service", 2567)
 ```
 
 Read the results in `reviews/PR-<number>-<sha8>.md`. The JSON front matter's
@@ -299,8 +303,8 @@ with less context than intended says so there.
 ## Scheduling
 
 ```bash
-prime-agent schedule add worker "0 */4 * * *" -- "Load the pr-review skill and sweep the open lane for service-b"
-prime-agent schedule add worker "0 9 * * 1-5" -- "Load the pr-review skill and sweep the merged lane for service-b"
+prime-agent schedule add worker "0 */4 * * *" -- "Load the pr-review skill and sweep the open lane for my-service"
+prime-agent schedule add worker "0 9 * * 1-5" -- "Load the pr-review skill and sweep the merged lane for my-service"
 prime-agent schedule list
 ```
 
@@ -310,7 +314,7 @@ when new commits change its head. Keep the cron strings in sync with
 
 ## Headless fallback (no TUI)
 
-`prime-review sweep --repo service-b` runs the same pipeline with the
+`prime-review sweep --repo my-service` runs the same pipeline with the
 Gemini-backed reviewer (needs `GEMINI_API_KEY`). The replay harness and demo
 scorer are `prime-review replay` / `prime-review score`.
 
@@ -320,7 +324,7 @@ Every gate is enforced in `prime_pr_review/sinks.py:evaluate_comment_gates`:
 
 | Gate | Effect |
 |---|---|
-| `read_only` (both example-org repos) | Hard write-ban, checked BEFORE dry_run — flipping dry_run is never enough to post |
+| `read_only` (any repo so marked in config.toml) | Hard write-ban, checked BEFORE dry_run — flipping dry_run is never enough to post |
 | `dry_run` | Nothing posts to GitHub |
 | `min_confidence` | With the ensemble on, confidence is the observed agreement ratio |
 | `max_comments_per_sweep` | Hard cap; a bad prompt cannot spray a repo |

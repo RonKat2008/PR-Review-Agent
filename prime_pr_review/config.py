@@ -34,8 +34,8 @@ class RepoConfig:
     name: str
     # Hard write-ban for this repo: the comment sink is refused regardless of
     # dry_run or any other setting. For repos the agent may read but must never
-    # post to (owner's standing instruction, e.g. example-org/service-a and
-    # example-org/service-b).
+    # post to (owner's standing instruction, e.g. any target repo marked
+    # read_only in config.toml).
     read_only: bool = False
 
     @property

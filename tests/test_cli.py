@@ -37,19 +37,19 @@ def test_unknown_command_exits_two(capsys):
 
 
 def test_pr_sugar_expands_to_a_single_pr_sweep(captured):
-    cli.main(["pr", "example-org/service-b", "2567"])
+    cli.main(["pr", "ExampleOrg/ServiceB", "2567"])
 
     script, *argv = captured[0]
     assert script == "run_sweep"
-    assert argv[:4] == ["--repo", "example-org/service-b", "--pr", "2567"]
+    assert argv[:4] == ["--repo", "ExampleOrg/ServiceB", "--pr", "2567"]
 
 
 def test_pr_sugar_without_a_number_exits_two(capsys):
-    assert cli.main(["pr", "example-org/service-b"]) == 2
+    assert cli.main(["pr", "ExampleOrg/ServiceB"]) == 2
 
 
 def test_sweep_pins_config_to_the_agent_root_when_absent(captured):
-    cli.main(["sweep", "--repo", "service-b"])
+    cli.main(["sweep", "--repo", "ServiceB"])
 
     argv = captured[0][1:]
     assert "--config" in argv
